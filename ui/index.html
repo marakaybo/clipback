@@ -99,9 +99,6 @@
               <div class="clip-meta" id="clip-meta"></div>
             </div>
             <div class="player-head-actions">
-              <button class="icon-btn sm shot-only" id="btn-edit" title="Редактировать (E)">
-                <svg viewBox="0 0 24 24"><path d="M4 20l1-4L16 5l3 3L8 19z"/><path d="M14 7l3 3"/></svg>
-              </button>
               <button class="icon-btn sm" id="btn-copy" title="Копировать файл (потом Ctrl+V в Discord)">
                 <svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg>
               </button>
@@ -124,6 +121,18 @@
             </div>
             <div class="stage-msg" id="stage-msg" hidden></div>
             <button class="big-play" id="big-play" title="Пробел"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
+          </div>
+
+          <div class="shot-bar" id="shot-bar">
+            <button class="btn btn-accent" id="btn-edit" title="Редактировать (E)">
+              <svg viewBox="0 0 24 24"><path d="M4 20l1-4L16 5l3 3L8 19z"/><path d="M14 7l3 3"/></svg>
+              <span>Редактировать</span>
+            </button>
+            <button class="btn btn-ghost" id="btn-shot-copy" title="Копировать файл (потом Ctrl+V в Discord)">
+              <svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg>
+              <span>Копировать</span>
+            </button>
+            <span class="muted shot-hint">Рисование, текст, стрелки, пикселизация и обрезка</span>
           </div>
 
           <div class="controls" id="controls">
@@ -180,34 +189,35 @@
         <div class="img-editor panel" id="editor" hidden>
           <div class="ed-top">
             <div class="ed-tools" id="ed-tools">
+              <button class="icon-btn" data-tool="move" title="Выбор и перемещение (V)"><svg viewBox="0 0 24 24"><path d="M5 3l6 16 2.5-6.5L20 10z"/></svg></button>
+              <span class="tools-sep"></span>
               <button class="icon-btn" data-tool="pen" title="Карандаш (P)"><svg viewBox="0 0 24 24"><path d="M4 20l1-4L16 5l3 3L8 19z"/><path d="M14 7l3 3"/></svg></button>
               <button class="icon-btn" data-tool="marker" title="Маркер (H), с Shift — ровная линия"><svg viewBox="0 0 24 24"><path d="M9 15l-4 4h5l2-2"/><path d="M9 15l6-10 4 3-6 10z"/></svg></button>
               <button class="icon-btn" data-tool="arrow" title="Стрелка (A)"><svg viewBox="0 0 24 24"><path d="M5 19L19 5M10 5h9v9"/></svg></button>
               <button class="icon-btn" data-tool="rect" title="Рамка (R)"><svg viewBox="0 0 24 24"><rect x="4" y="6" width="16" height="12" rx="2"/></svg></button>
               <button class="icon-btn" data-tool="text" title="Текст (T)"><svg viewBox="0 0 24 24"><path d="M5 6V4h14v2M12 4v16M9 20h6"/></svg></button>
               <button class="icon-btn" data-tool="pixel" title="Пикселизация (B) — скрыть ник, чат, личное"><svg viewBox="0 0 24 24"><path d="M4 4h5v5H4zM15 4h5v5h-5zM9.5 9.5h5v5h-5zM4 15h5v5H4zM15 15h5v5h-5z"/></svg></button>
+              <span class="tools-sep"></span>
               <button class="icon-btn" data-tool="crop" title="Обрезка (C)"><svg viewBox="0 0 24 24"><path d="M6 2v16h16"/><path d="M2 6h16v16"/></svg></button>
             </div>
             <span class="tools-sep"></span>
             <div class="ed-colors" id="ed-colors" title="Цвет (1–6)"></div>
             <span class="tools-sep"></span>
-            <div class="seg small" id="ed-sizes" title="Толщина">
-              <button class="seg-btn" data-size="s">Тонко</button>
-              <button class="seg-btn" data-size="m">Средне</button>
-              <button class="seg-btn" data-size="l">Толсто</button>
+            <div class="ed-sizes" id="ed-sizes">
+              <button class="icon-btn" data-size="s" title="Тонко"><i style="--d:4px"></i></button>
+              <button class="icon-btn" data-size="m" title="Средне"><i style="--d:7px"></i></button>
+              <button class="icon-btn" data-size="l" title="Толсто"><i style="--d:11px"></i></button>
             </div>
             <span class="tools-sep"></span>
             <button class="icon-btn" id="ed-undo" title="Отменить (Ctrl+Z)"><svg viewBox="0 0 24 24"><path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></svg></button>
             <button class="icon-btn" id="ed-redo" title="Вернуть (Ctrl+Y)"><svg viewBox="0 0 24 24"><path d="M15 14l5-5-5-5"/><path d="M20 9H10a6 6 0 0 0 0 12h3"/></svg></button>
-            <div class="spacer"></div>
-            <span class="ed-title" id="ed-title"></span>
+            <button class="icon-btn danger" id="ed-delete" title="Удалить выделенное (Delete)" hidden><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg></button>
           </div>
           <div class="ed-stage" id="ed-stage"><canvas id="ed-canvas"></canvas></div>
           <div class="ed-bottom">
-            <span class="mono muted" id="ed-size-info"></span>
-            <div class="spacer"></div>
+            <span class="ed-hint" id="ed-hint"></span>
+            <span class="mono muted ed-size" id="ed-size-info"></span>
             <div class="row-btns" id="ed-crop-bar" hidden>
-              <span class="muted ed-hint">Выделите нужную область</span>
               <button class="btn btn-ghost" id="ed-crop-reset">Вся картинка</button>
               <button class="btn btn-ghost" id="ed-crop-cancel">Отмена</button>
               <button class="btn btn-accent" id="ed-crop-apply">Обрезать (Enter)</button>

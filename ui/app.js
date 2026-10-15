@@ -335,7 +335,9 @@ function main() {
       info.children[1].textContent = `${hhmm(when)} · ${c.kind === "shot" ? `${c.width}×${c.height}` : mb(c.size)}`;
       el.title = c.name;
       el.append(th, info);
-      el.onclick = () => selectClip(c);
+      // выбор по нажатию: если список перерисуется до отпускания кнопки, щелчок не потеряется
+      el.onpointerdown = (e) => { if (e.button === 0 && !(S.clip && S.clip.path === c.path)) selectClip(c); };
+      el.onclick = () => { if (!(S.clip && S.clip.path === c.path)) selectClip(c); };
       box.append(el);
       thumbObserver.observe(el);
     }
@@ -1037,6 +1039,7 @@ function main() {
     });
   }
   $("#btn-edit").onclick = editShot;
+  $("#btn-shot-copy").onclick = () => $("#btn-copy").click();
 
   // ---------- действия с клипом ----------
   $("#btn-copy").onclick = async () => {

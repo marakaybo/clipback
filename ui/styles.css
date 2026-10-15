@@ -205,6 +205,7 @@ html[data-mode="overlay"] .panel, html[data-mode="browser"] .panel { background:
 .list-empty { padding: 24px 12px; color: var(--text-3); text-align: center; }
 .clip { display: flex; gap: 10px; align-items: center; text-align: left; padding: 5px; border-radius: var(--r); flex: none; }
 .clip:hover { background: rgba(255,255,255,.035); }
+.clip > * { pointer-events: none; }
 .clip.active { background: var(--s4); }
 .thumb { width: 88px; height: 50px; border-radius: var(--r-sm); flex: none; position: relative; overflow: hidden; background: var(--s3); }
 .thumb canvas, .thumb img { width: 100%; height: 100%; display: block; object-fit: cover; }
@@ -229,14 +230,21 @@ html[data-mode="overlay"] .panel, html[data-mode="browser"] .panel { background:
 
 /* ---------- Плеер ---------- */
 .editor { display: flex; flex-direction: column; gap: 8px; min-width: 0; min-height: 0; position: relative; }
-.shot-only { display: none; }
-.app.is-shot .shot-only { display: grid; }
+/* действия со скриншотом — под картинкой */
+.shot-bar { display: none; align-items: center; gap: 6px; flex: none; }
+.app.is-shot .shot-bar { display: flex; }
+.shot-bar .btn svg { width: 16px; height: 16px; }
+.shot-hint { margin-left: 6px; font-size: var(--fs-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ---------- редактор скриншота ---------- */
-.img-editor { position: absolute; inset: 0; z-index: 20; display: flex; flex-direction: column; gap: 8px; padding: 8px 10px 10px; }
+.img-editor { position: absolute; inset: 0; z-index: 20; background: var(--s2); display: flex; flex-direction: column; gap: 8px; padding: 8px 10px 10px; }
 .img-editor[hidden] { display: none; }
 .img-editor.busy { pointer-events: none; opacity: .7; }
-.ed-top, .ed-bottom { display: flex; align-items: center; gap: 4px; flex: none; flex-wrap: wrap; }
+.ed-top, .ed-bottom { display: flex; align-items: center; gap: 4px; flex: none; min-width: 0; }
+.ed-top { flex-wrap: wrap; row-gap: 4px; }
+.ed-sizes { display: flex; gap: 0; }
+.ed-sizes i { width: var(--d); height: var(--d); border-radius: 50%; background: currentColor; display: block; }
+.ed-sizes .icon-btn.active { color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); }
 .ed-tools { display: flex; gap: 2px; }
 .ed-tools .icon-btn.active { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); }
 .ed-colors { display: flex; gap: 6px; padding: 0 4px; }
@@ -246,7 +254,10 @@ html[data-mode="overlay"] .panel, html[data-mode="browser"] .panel { background:
 .ed-stage { flex: 1; min-height: 0; display: grid; place-items: center; background: #000; border-radius: var(--r-sm); overflow: hidden; }
 .ed-stage canvas { display: block; touch-action: none; cursor: crosshair; }
 .img-editor[data-tool="text"] .ed-stage canvas { cursor: text; }
-.ed-hint { margin-right: 6px; font-size: var(--fs-sm); }
+.ed-hint { color: var(--text-2); font-size: var(--fs-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1 1 0; }
+.ed-size { margin-left: 10px; font-size: var(--fs-xs); }
+.ed-bottom .row-btns { flex: none; }
+.ed-tools .tools-sep { align-self: center; }
 .ed-text {
   position: fixed; z-index: 90; margin: 0; padding: 0; border: 1px dashed rgba(255,255,255,.6); outline: none; resize: none; overflow: hidden;
   background: rgba(0,0,0,.25); font-family: "Segoe UI", system-ui, sans-serif; font-weight: 600; line-height: 1.2; white-space: pre;
