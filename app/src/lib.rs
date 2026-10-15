@@ -29,6 +29,7 @@ enum Action {
     Overlay,
     Save,
     Screenshot,
+    Record,
 }
 
 #[derive(Default, Clone, Serialize)]
@@ -64,6 +65,10 @@ struct Inner {
     last_game: Option<String>,
     hotkeys: Vec<(Shortcut, Action)>,
     hotkey_errors: Vec<String>,
+    /// Полноценная запись идёт с этого момента (мс с 1970 года).
+    record_started: Option<u64>,
+    /// Запись попросили, когда захват был выключен: начать её сразу после запуска.
+    record_after_start: bool,
 }
 
 struct AppState {
@@ -76,6 +81,7 @@ struct AppState {
     /// Форма волны клипов: путь+время изменения -> пики дорожек.
     peaks: Mutex<std::collections::HashMap<String, Vec<Vec<f32>>>>,
     rec_item: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
+    record_item: Mutex<Option<MenuItem<tauri::Wry>>>,
 }
 
 #[derive(Serialize, Clone)]
@@ -88,6 +94,7 @@ struct StateDto {
     error: Option<String>,
     last_game: Option<String>,
     hotkey_errors: Vec<String>,
+    record_started: Option<u64>,
     settings: Settings,
     version: &'static str,
     portable: bool,
@@ -102,6 +109,7 @@ fn dto(i: &Inner) -> StateDto {
         error: i.error.clone(),
         last_game: i.last_game.clone(),
         hotkey_errors: i.hotkey_errors.clone(),
+        record_started: i.record_started,
         settings: i.settings.clone(),
         version: env!("CARGO_PKG_VERSION"),
         portable: update::is_portable(),
@@ -201,6 +209,10 @@ fn start_recording(app: &AppHandle) {
                         }
                         i.capture = Some(CaptureInfo { encoder, gpu, monitor, width, height, fps, audio, audio_error });
                     }
+                    if std::mem::take(&mut i.record_after_start) {
+                        let label = i.last_game.clone();
+                        let _ = rec.sender().send(Command::StartRecord { label });
+                    }
                     i.recorder = Some(rec);
                 }
                 emit_state(&app);
@@ -211,6 +223,7 @@ fn start_recording(app: &AppHandle) {
                 {
                     let mut i = lock(&app);
                     i.starting = false;
+                    i.record_after_start = false;
                     i.error = Some(format!("{e:#}"));
                 }
                 emit_state(&app);
@@ -223,12 +236,14 @@ fn stop_recording(app: &AppHandle) {
     let rec = {
         let mut i = lock(app);
         i.status = None;
+        i.record_started = None;
         i.recorder.take()
     };
     st(app).generation.fetch_add(1, Ordering::SeqCst);
-    // остановка ждёт поток захвата — делаем это вне блокировки
+    // остановка ждёт поток захвата (и дописывание файла записи) — делаем это вне блокировки
     drop(rec);
     log("запись остановлена");
+    clips_changed(app);
     emit_state(app);
 }
 
@@ -258,12 +273,38 @@ fn forward_events(app: AppHandle, events: mpsc::Receiver<Event>, generation: u64
                 log(format!("не удалось сохранить: {message}"));
                 show_toast(&app, "Не удалось сохранить", &message, "error");
             }
+            Event::RecordStarted { path } => {
+                log(format!("запись в файл: {}", path.display()));
+                let key = {
+                    let mut i = lock(&app);
+                    i.record_started = Some(now_ms());
+                    i.settings.hotkey_record.clone()
+                };
+                emit_state(&app);
+                show_toast(&app, "Запись началась", &format!("{key} — остановить"), "rec");
+            }
+            Event::Recorded { path, seconds, bytes } => {
+                log(format!("запись сохранена {:.1} с, {} байт: {}", seconds, bytes, path.display()));
+                lock(&app).record_started = None;
+                emit_state(&app);
+                clips_changed(&app);
+                let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                let _ = app.emit("clip-saved", path.to_string_lossy().to_string());
+                show_toast(&app, "Запись сохранена", &format!("{} · {}", fmt_secs(seconds), name), "rec");
+            }
+            Event::RecordFailed { message } => {
+                log(format!("запись не удалась: {message}"));
+                lock(&app).record_started = None;
+                emit_state(&app);
+                show_toast(&app, "Запись не удалась", &message, "error");
+            }
             Event::Error { message } => {
                 log(format!("ошибка записи: {message}"));
                 let rec = {
                     let mut i = lock(&app);
                     i.error = Some(message.clone());
                     i.status = None;
+                    i.record_started = None;
                     i.recorder.take()
                 };
                 drop(rec);
@@ -278,7 +319,30 @@ fn forward_events(app: AppHandle, events: mpsc::Receiver<Event>, generation: u64
 
 fn fmt_secs(s: f64) -> String {
     let s = s.round() as u64;
+    if s >= 3600 {
+        return format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60);
+    }
     format!("{}:{:02}", s / 60, s % 60)
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+/// Начать или остановить полноценную запись. Если захват выключен — включить его и начать.
+fn toggle_record(app: &AppHandle) {
+    let label = current_game_label(app);
+    let mut i = lock(app);
+    if let Some(r) = &i.recorder {
+        let cmd = if i.record_started.is_some() { Command::StopRecord } else { Command::StartRecord { label } };
+        let _ = r.sender().send(cmd);
+    } else if i.starting {
+        i.record_after_start = !i.record_after_start;
+    } else {
+        i.record_after_start = true;
+        drop(i);
+        start_recording(app);
+    }
 }
 
 /// Название игры для имени файла: окно в фокусе, если это не сам Clipback.
@@ -486,13 +550,15 @@ fn create_windows(app: &AppHandle, start_hidden: bool) -> tauri::Result<()> {
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Открыть Clipback", true, None::<&str>)?;
     let save = MenuItem::with_id(app, "save", "Сохранить повтор", true, None::<&str>)?;
+    let record = MenuItem::with_id(app, "record", "Начать запись", true, None::<&str>)?;
     let rec = CheckMenuItem::with_id(app, "rec", "Запись буфера", true, true, None::<&str>)?;
     let folder = MenuItem::with_id(app, "folder", "Открыть папку клипов", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Выход", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&open, &save, &sep, &rec, &folder, &sep2, &quit])?;
+    let menu = Menu::with_items(app, &[&open, &save, &record, &sep, &rec, &folder, &sep2, &quit])?;
     *st(app).rec_item.lock().unwrap() = Some(rec);
+    *st(app).record_item.lock().unwrap() = Some(record);
 
     TrayIconBuilder::with_id("main")
         .icon(app.default_window_icon().cloned().expect("нет иконки"))
@@ -502,6 +568,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         .on_menu_event(|app, e| match e.id().as_ref() {
             "open" => show_main(app),
             "save" => save_replay(app),
+            "record" => toggle_record(app),
             "rec" => {
                 if lock(app).recorder.is_some() {
                     stop_recording(app)
@@ -530,8 +597,12 @@ fn update_tray(app: &AppHandle, d: &StateDto) {
     if let Some(item) = st(app).rec_item.lock().ok().and_then(|g| g.clone()) {
         let _ = item.set_checked(d.recording || d.starting);
     }
+    if let Some(item) = st(app).record_item.lock().ok().and_then(|g| g.clone()) {
+        let _ = item.set_text(if d.record_started.is_some() { "Остановить запись" } else { "Начать запись" });
+    }
     if let Some(tray) = app.tray_by_id("main") {
         let tip = match (&d.status, d.recording) {
+            _ if d.record_started.is_some() => "Clipback — идёт запись".to_string(),
             (Some(s), true) => format!("Clipback — в буфере {}", fmt_secs(s.buffered_secs)),
             (_, true) => "Clipback — запись идёт".to_string(),
             _ => "Clipback — запись выключена".to_string(),
@@ -552,6 +623,7 @@ fn register_hotkeys(app: &AppHandle) {
         (&s.hotkey_overlay, Action::Overlay, "оверлей"),
         (&s.hotkey_save, Action::Save, "сохранение"),
         (&s.hotkey_screenshot, Action::Screenshot, "скриншот"),
+        (&s.hotkey_record, Action::Record, "запись"),
     ] {
         match combo.parse::<Shortcut>() {
             Ok(sc) => match gs.register(sc) {
@@ -574,6 +646,7 @@ fn on_hotkey(app: &AppHandle, sc: &Shortcut) {
     match action {
         Some(Action::Overlay) => toggle_overlay(app),
         Some(Action::Save) => save_replay(app),
+        Some(Action::Record) => toggle_record(app),
         Some(Action::Screenshot) => {
             let app = app.clone();
             std::thread::spawn(move || match take_screenshot(&app) {
@@ -618,6 +691,11 @@ fn set_recording(app: AppHandle, on: bool) {
 #[tauri::command]
 fn save_replay_cmd(app: AppHandle) {
     save_replay(&app)
+}
+
+#[tauri::command]
+fn toggle_record_cmd(app: AppHandle) {
+    toggle_record(&app)
 }
 
 #[tauri::command]
@@ -717,6 +795,16 @@ async fn save_frame(app: AppHandle, png_base64: String, label: Option<String>) -
 }
 
 #[tauri::command]
+async fn save_edited_image(app: AppHandle, path: String, png_base64: String, replace: bool) -> Res<clips::ClipEntry> {
+    let p = checked_path(&app, &path)?;
+    let data = base64::engine::general_purpose::STANDARD.decode(png_base64.as_bytes()).map_err(err)?;
+    let e = clips::save_edited(&p, &data, replace).map_err(|e| format!("{e:#}"))?;
+    log(format!("скриншот отредактирован: {}", e.path));
+    clips_changed(&app);
+    Ok(e)
+}
+
+#[tauri::command]
 fn set_settings(app: AppHandle, settings: Settings) -> Res<Settings> {
     let new = settings.sanitized();
     let (old, path) = {
@@ -731,7 +819,9 @@ fn set_settings(app: AppHandle, settings: Settings) -> Res<Settings> {
         let _ = app.asset_protocol_scope().allow_directory(&new.out_dir, true);
         clips_changed(&app);
     }
-    if (&old.hotkey_overlay, &old.hotkey_save, &old.hotkey_screenshot) != (&new.hotkey_overlay, &new.hotkey_save, &new.hotkey_screenshot) {
+    if (&old.hotkey_overlay, &old.hotkey_save, &old.hotkey_screenshot, &old.hotkey_record)
+        != (&new.hotkey_overlay, &new.hotkey_save, &new.hotkey_screenshot, &new.hotkey_record)
+    {
         register_hotkeys(&app);
     }
     if old.autostart != new.autostart {
@@ -878,6 +968,7 @@ pub fn run() {
                 overlay_seq: AtomicU64::new(0),
                 peaks: Mutex::new(Default::default()),
                 rec_item: Mutex::new(None),
+            record_item: Mutex::new(None),
             });
 
             create_windows(&handle, start_hidden)?;
@@ -897,6 +988,7 @@ pub fn run() {
             get_state,
             set_recording,
             save_replay_cmd,
+            toggle_record_cmd,
             screenshot,
             list_clips,
             trim_clip,
@@ -906,6 +998,7 @@ pub fn run() {
             open_clips_folder,
             copy_clip,
             save_frame,
+            save_edited_image,
             set_settings,
             list_monitors,
             list_mics,

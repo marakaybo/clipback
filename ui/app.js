@@ -73,6 +73,7 @@ const ICONS = {
   folder: `<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>`,
   info: `<circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v5h1"/>`,
   error: `<circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/>`,
+  rec: `<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4" fill="currentColor" stroke="none"/>`,
   check: `<path d="M5 12l4 4L19 6"/>`,
 };
 const svg = (name) => `<svg viewBox="0 0 24 24">${ICONS[name] || ICONS.info}</svg>`;
@@ -143,6 +144,7 @@ function main() {
 
   // ---------- подтверждение ----------
   let confirmResolve = null;
+  window.confirmBox = confirmBox;
   function confirmBox(title, text, yes = "Да") {
     $("#confirm-title").textContent = title;
     $("#confirm-text").textContent = text;
@@ -159,6 +161,35 @@ function main() {
   $("#confirm-yes").onclick = () => closeConfirm(true);
   $("#confirm-no").onclick = () => closeConfirm(false);
   $("#confirm").addEventListener("pointerdown", (e) => e.target.id === "confirm" && closeConfirm(false));
+
+  // ---------- полноценная запись ----------
+  let recTimer = null;
+  function renderRecord() {
+    const st = S.state;
+    const on = !!(st && st.recordStarted);
+    const btn = $("#btn-record");
+    btn.classList.toggle("recording", on);
+    const key = st ? st.settings.hotkeyRecord : "";
+    btn.title = on ? `Остановить запись (${key})` : `Начать полноценную запись (${key})`;
+    const tick = () => {
+      const secs = Math.max(0, (Date.now() - S.state.recordStarted) / 1000);
+      $("#record-label").textContent = fmtClock(secs);
+    };
+    if (on) {
+      tick();
+      if (!recTimer) recTimer = setInterval(() => (S.state && S.state.recordStarted ? tick() : renderRecord()), 500);
+    } else {
+      clearInterval(recTimer);
+      recTimer = null;
+      $("#record-label").textContent = "Запись";
+    }
+  }
+  const fmtClock = (s) => {
+    s = Math.floor(s);
+    const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, sec = s % 60;
+    return (h ? `${h}:${String(m).padStart(2, "0")}` : `${m}`) + `:${String(sec).padStart(2, "0")}`;
+  };
+  $("#btn-record").onclick = () => call("toggle_record_cmd");
 
   // ---------- статус записи ----------
   function renderState() {
@@ -179,6 +210,7 @@ function main() {
     $("#btn-save-replay").disabled = !st.recording;
     $("#btn-save-replay").title = `Сохранить последние ${fmt(s.bufferMinutes * 60, 0)} (${s.hotkeySave})`;
     $("#btn-screenshot-live").title = `Скриншот экрана (${s.hotkeyScreenshot})`;
+    renderRecord();
     $("#empty-hint").textContent = `Нажмите ${s.hotkeySave} в игре — сохранятся последние ${fmtMinutes(s.bufferMinutes)}. Открыть Clipback поверх игры — ${s.hotkeyOverlay}.`;
 
     // плашка с проблемой
@@ -966,6 +998,46 @@ function main() {
   }
   $("#btn-frame").onclick = saveFrame;
 
+  // ---------- редактор скриншота ----------
+  async function editShot() {
+    const c = S.clip;
+    if (!c || c.kind !== "shot" || !window.ImageEditor) return;
+    let src;
+    try {
+      if (c.demo) {
+        src = document.createElement("canvas");
+        src.width = 1920;
+        src.height = 1080;
+        api.drawDemo(src.getContext("2d"), src.width, src.height, 10, c);
+      } else {
+        src = await new Promise((res, rej) => {
+          const im = new Image();
+          im.crossOrigin = "anonymous";
+          im.onload = () => res(im);
+          im.onerror = () => rej("картинка не загрузилась");
+          im.src = api.fileUrl(c.path) + (api.fileUrl(c.path).includes("?") ? "&" : "?") + "edit=" + c.modified;
+        });
+      }
+    } catch (e) {
+      return toast("Не удалось открыть редактор", String(e), "error");
+    }
+    window.ImageEditor.open(src, {
+      title: clipTitle(c),
+      onSave: async (png, replace) => {
+        try {
+          const e = await api.call("save_edited_image", { path: c.path, pngBase64: png, replace });
+          toast(replace ? "Скриншот изменён" : "Копия сохранена", e.name, "check");
+          S.pendingSelect = e.path;
+          await loadClips(e.path);
+        } catch (err) {
+          toast("Не удалось сохранить", String(err), "error");
+          throw err;
+        }
+      },
+    });
+  }
+  $("#btn-edit").onclick = editShot;
+
   // ---------- действия с клипом ----------
   $("#btn-copy").onclick = async () => {
     if (!S.clip) return;
@@ -1396,7 +1468,7 @@ function main() {
     const combo = [...mods, key].join("+");
     const field = capturing.dataset.key;
     const s = S.state.settings;
-    const clash = ["hotkeyOverlay", "hotkeySave", "hotkeyScreenshot"].find((k) => k !== field && s[k].toLowerCase() === combo.toLowerCase());
+    const clash = ["hotkeyOverlay", "hotkeySave", "hotkeyScreenshot", "hotkeyRecord"].find((k) => k !== field && s[k].toLowerCase() === combo.toLowerCase());
     stopKeyCapture();
     if (clash) return toast("Сочетание уже занято", `${combo} используется для другого действия`, "error");
     saveSettings({ [field]: combo });
@@ -1456,6 +1528,7 @@ function main() {
       case "ArrowDown": e.preventDefault(); if (idx >= 0 && idx < list.length - 1) selectClip(list[idx + 1]); break;
       case "KeyM": video.muted = !video.muted; renderVolume(); break;
       case "KeyF": setFullView(!isFullView()); break;
+      case "KeyE": editShot(); break;
       case "Delete": deleteClip(); break;
       case "KeyS":
         if (e.ctrlKey) { e.preventDefault(); exportClip(); }

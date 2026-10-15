@@ -13,7 +13,7 @@ use std::io::{BufReader, BufWriter};
 use std::path::Path;
 use std::sync::Arc;
 
-const TIMESCALE: u64 = 90_000;
+pub(crate) const TIMESCALE: u64 = 90_000;
 
 /// Разбить поток Annex-B на NAL-блоки (без стартовых кодов).
 pub fn split_nals(data: &[u8]) -> Vec<&[u8]> {
@@ -75,9 +75,9 @@ pub fn find_sps_pps(data: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
     Some((sps?, pps?))
 }
 
-type Writer = Mp4Writer<BufWriter<File>>;
+pub(crate) type Writer = Mp4Writer<BufWriter<File>>;
 
-fn new_writer(path: &Path) -> Result<Writer> {
+pub(crate) fn new_writer(path: &Path) -> Result<Writer> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -96,7 +96,7 @@ fn new_writer(path: &Path) -> Result<Writer> {
     Ok(Mp4Writer::write_start(file, &config)?)
 }
 
-fn add_video(w: &mut Writer, width: u32, height: u32, sps: Vec<u8>, pps: Vec<u8>, timescale: u32) -> Result<()> {
+pub(crate) fn add_video(w: &mut Writer, width: u32, height: u32, sps: Vec<u8>, pps: Vec<u8>, timescale: u32) -> Result<()> {
     w.add_track(&TrackConfig {
         track_type: TrackType::Video,
         timescale,
@@ -106,12 +106,12 @@ fn add_video(w: &mut Writer, width: u32, height: u32, sps: Vec<u8>, pps: Vec<u8>
     Ok(())
 }
 
-fn add_audio(w: &mut Writer, cfg: AacConfig, timescale: u32) -> Result<()> {
+pub(crate) fn add_audio(w: &mut Writer, cfg: AacConfig, timescale: u32) -> Result<()> {
     w.add_track(&TrackConfig { track_type: TrackType::Audio, timescale, language: "und".into(), media_conf: MediaConfig::AacConfig(cfg) })?;
     Ok(())
 }
 
-fn our_aac() -> AacConfig {
+pub(crate) fn our_aac() -> AacConfig {
     AacConfig {
         bitrate: crate::aac::BITRATE,
         profile: AudioObjectType::AacLowComplexity,
@@ -159,7 +159,7 @@ fn layout_audio(a: &AudioInput, t0_100ns: i64, end_samples: i64) -> Vec<(i64, By
     out
 }
 
-fn audio_sample(pos: i64, data: Bytes) -> Mp4Sample {
+pub(crate) fn audio_sample(pos: i64, data: Bytes) -> Mp4Sample {
     Mp4Sample { start_time: pos as u64, duration: crate::aac::FRAME as u32, rendering_offset: 0, is_sync: true, bytes: data }
 }
 
@@ -230,7 +230,7 @@ pub fn write_av_named(path: &Path, packets: &[Arc<Packet>], audio: &[AudioInput]
     finish(&tmp, path, r)
 }
 
-fn finish(tmp: &Path, path: &Path, r: Result<()>) -> Result<()> {
+pub(crate) fn finish(tmp: &Path, path: &Path, r: Result<()>) -> Result<()> {
     if let Err(e) = r {
         let _ = std::fs::remove_file(tmp);
         return Err(e);

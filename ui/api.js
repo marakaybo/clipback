@@ -65,7 +65,7 @@
   const settings = {
     bufferMinutes: 5, fps: 60, quality: "medium", maxHeight: null, monitor: 0,
     outDir: "C:\\Users\\you\\Videos\\Clipback",
-    hotkeyOverlay: "Alt+Z", hotkeySave: "Alt+F10", hotkeyScreenshot: "Alt+F1",
+    hotkeyOverlay: "Alt+Z", hotkeySave: "Alt+F10", hotkeyScreenshot: "Alt+F1", hotkeyRecord: "Alt+F9",
     systemAudio: true, mic: true, micDevice: null, micGain: 1, audioMode: "advanced", customBitrate: 12,
     appTracks: [{ name: "Discord", exe: "Discord.exe", enabled: true }],
     recordOnStart: true, closeToTray: true, autostart: false, checkUpdates: true,
@@ -88,6 +88,18 @@
 
   const handlers = {
     get_state: () => state,
+    save_edited_image: ({ path, replace }) => {
+      const c = find(path);
+      if (replace) { c.modified = Date.now(); return { ...c }; }
+      const copy = { ...c, path: `demo://${seq++}`, name: `${c.name} — правка`, modified: Date.now() };
+      clips.push(copy);
+      emit("clips-changed");
+      return copy;
+    },
+    toggle_record_cmd: () => {
+      state.recordStarted = state.recordStarted ? null : Date.now();
+      emit("state", state);
+    },
     check_update: () => new Promise((r) => setTimeout(() => r({ version: "0.2.0", notes: "", portable: true }), 600)),
     install_update: () => new Promise((r) => {
       let done = 0;

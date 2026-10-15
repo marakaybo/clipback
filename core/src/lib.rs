@@ -12,6 +12,7 @@ pub mod convert;
 pub mod encoder;
 pub mod gpu;
 pub mod hotkey;
+pub mod live;
 pub mod media;
 pub mod mux;
 pub mod recorder;

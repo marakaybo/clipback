@@ -194,6 +194,29 @@ pub fn save_png(dir: &Path, label: &str, png: &[u8]) -> Result<ClipEntry> {
     entry(&p)
 }
 
+/// Сохранить отредактированный скриншот: копией рядом («… правка») или поверх оригинала.
+pub fn save_edited(src: &Path, png: &[u8], replace: bool) -> Result<ClipEntry> {
+    if png.len() < 8 || &png[..8] != b"\x89PNG\r\n\x1a\n" {
+        bail!("это не PNG");
+    }
+    let is_png = src.extension().is_some_and(|e| e.eq_ignore_ascii_case("png"));
+    let dst = if replace && is_png {
+        src.to_path_buf()
+    } else {
+        let dir = src.parent().context("нет папки")?;
+        let stem = src.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Скриншот".into());
+        util::unique_path(dir, &format!("{stem} правка"), "png")
+    };
+    // сначала во временный файл: оригинал не испортится, если запись прервётся
+    let tmp = dst.with_extension("png.part");
+    std::fs::write(&tmp, png)?;
+    if let Err(e) = std::fs::rename(&tmp, &dst) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("не удалось записать {}", dst.display()));
+    }
+    entry(&dst)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,5 +276,32 @@ mod tests {
         let e = save_png(&dir, "Игра", &png).unwrap();
         assert_eq!((e.width, e.height), (2, 3));
         assert!(e.name.starts_with("Игра "));
+    }
+}
+
+#[cfg(test)]
+mod edit_tests {
+    use super::*;
+
+    #[test]
+    fn edited_shot_saved_as_copy_or_replaced() {
+        let dir = std::env::temp_dir().join("clipback-edit-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = |b: u8| [b"\x89PNG\r\n\x1a\n".as_slice(), &[b; 16]].concat();
+        let src = dir.join("Игра 2026-10-15 21-00-00.png");
+        std::fs::write(&src, png(1)).unwrap();
+
+        let copy = save_edited(&src, &png(2), false).unwrap();
+        assert!(copy.path.ends_with("Игра 2026-10-15 21-00-00 правка.png"), "{}", copy.path);
+        assert_eq!(std::fs::read(&src).unwrap(), png(1));
+        // вторая копия не затирает первую
+        let copy2 = save_edited(&src, &png(3), false).unwrap();
+        assert_ne!(copy.path, copy2.path);
+
+        save_edited(&src, &png(4), true).unwrap();
+        assert_eq!(std::fs::read(&src).unwrap(), png(4));
+        assert!(save_edited(&src, b"not a png", true).is_err());
+        assert_eq!(std::fs::read(&src).unwrap(), png(4));
     }
 }

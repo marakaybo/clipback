@@ -36,9 +36,13 @@ impl Ring {
     }
 
     pub fn push_audio(&mut self, track: usize, p: AudioPacket) {
+        self.push_audio_arc(track, Arc::new(p))
+    }
+
+    pub fn push_audio_arc(&mut self, track: usize, p: Arc<AudioPacket>) {
         if let Some(q) = self.audio.get_mut(track) {
             self.bytes += p.data.len();
-            q.push_back(Arc::new(p));
+            q.push_back(p);
         }
         self.trim_audio();
     }
@@ -64,12 +68,16 @@ impl Ring {
     }
 
     pub fn push(&mut self, p: Packet) {
+        self.push_arc(Arc::new(p))
+    }
+
+    pub fn push_arc(&mut self, p: Arc<Packet>) {
         // пока не пришёл первый ключевой кадр, сохранять нечего
         if self.packets.is_empty() && !p.key {
             return;
         }
         self.bytes += p.data.len();
-        self.packets.push_back(Arc::new(p));
+        self.packets.push_back(p);
         self.trim();
     }
 
@@ -125,6 +133,18 @@ impl Ring {
             _ => self.audio.iter().map(|_| Vec::new()).collect(),
         };
         Snapshot { video, audio }
+    }
+
+    /// Начало для полноценной записи: от последнего ключевого кадра до сейчас.
+    pub fn since_last_key(&self) -> Snapshot {
+        let Some(k) = self.packets.iter().rposition(|p| p.key) else {
+            return Snapshot { video: Vec::new(), audio: self.audio.iter().map(|_| Vec::new()).collect() };
+        };
+        let from = self.packets[k].pts - 300_000;
+        Snapshot {
+            video: self.packets.iter().skip(k).cloned().collect(),
+            audio: self.audio.iter().map(|q| q.iter().filter(|p| audio_time(p.pos) >= from).cloned().collect()).collect(),
+        }
     }
 
     fn video_from(&self, seconds: Option<u32>) -> Vec<Arc<Packet>> {

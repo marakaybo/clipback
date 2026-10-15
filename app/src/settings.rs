@@ -35,6 +35,8 @@ pub struct Settings {
     pub hotkey_overlay: String,
     pub hotkey_save: String,
     pub hotkey_screenshot: String,
+    /// Начать / остановить полноценную запись.
+    pub hotkey_record: String,
     /// Звук системы (всё, что слышно в наушниках).
     pub system_audio: bool,
     pub mic: bool,
@@ -67,6 +69,7 @@ impl Default for Settings {
             hotkey_overlay: "Alt+Z".into(),
             hotkey_save: "Alt+F10".into(),
             hotkey_screenshot: "Alt+F1".into(),
+            hotkey_record: "Alt+F9".into(),
             system_audio: true,
             mic: false,
             mic_device: None,
@@ -140,6 +143,7 @@ impl Settings {
             (&mut self.hotkey_overlay, d.hotkey_overlay),
             (&mut self.hotkey_save, d.hotkey_save),
             (&mut self.hotkey_screenshot, d.hotkey_screenshot),
+            (&mut self.hotkey_record, d.hotkey_record),
         ] {
             if k.trim().is_empty() {
                 *k = def;

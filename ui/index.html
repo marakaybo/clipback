@@ -41,6 +41,10 @@
       </div>
 
       <div class="top-actions">
+        <button class="btn btn-ghost rec-btn" id="btn-record">
+          <i class="rec-dot"></i>
+          <span id="record-label">Запись</span>
+        </button>
         <button class="btn btn-accent" id="btn-save-replay">
           <svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>
           <span>Сохранить повтор</span>
@@ -95,6 +99,9 @@
               <div class="clip-meta" id="clip-meta"></div>
             </div>
             <div class="player-head-actions">
+              <button class="icon-btn sm shot-only" id="btn-edit" title="Редактировать (E)">
+                <svg viewBox="0 0 24 24"><path d="M4 20l1-4L16 5l3 3L8 19z"/><path d="M14 7l3 3"/></svg>
+              </button>
               <button class="icon-btn sm" id="btn-copy" title="Копировать файл (потом Ctrl+V в Discord)">
                 <svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg>
               </button>
@@ -168,6 +175,50 @@
           </div>
           <div class="hint tracks-hint" id="tracks-hint" hidden>Выключенная дорожка не попадёт в отрезок. «Звук системы» — это весь звук компьютера, включая приложения с отдельными дорожками.</div>
         </section>
+
+        <!-- Редактор скриншота -->
+        <div class="img-editor panel" id="editor" hidden>
+          <div class="ed-top">
+            <div class="ed-tools" id="ed-tools">
+              <button class="icon-btn" data-tool="pen" title="Карандаш (P)"><svg viewBox="0 0 24 24"><path d="M4 20l1-4L16 5l3 3L8 19z"/><path d="M14 7l3 3"/></svg></button>
+              <button class="icon-btn" data-tool="marker" title="Маркер (H), с Shift — ровная линия"><svg viewBox="0 0 24 24"><path d="M9 15l-4 4h5l2-2"/><path d="M9 15l6-10 4 3-6 10z"/></svg></button>
+              <button class="icon-btn" data-tool="arrow" title="Стрелка (A)"><svg viewBox="0 0 24 24"><path d="M5 19L19 5M10 5h9v9"/></svg></button>
+              <button class="icon-btn" data-tool="rect" title="Рамка (R)"><svg viewBox="0 0 24 24"><rect x="4" y="6" width="16" height="12" rx="2"/></svg></button>
+              <button class="icon-btn" data-tool="text" title="Текст (T)"><svg viewBox="0 0 24 24"><path d="M5 6V4h14v2M12 4v16M9 20h6"/></svg></button>
+              <button class="icon-btn" data-tool="pixel" title="Пикселизация (B) — скрыть ник, чат, личное"><svg viewBox="0 0 24 24"><path d="M4 4h5v5H4zM15 4h5v5h-5zM9.5 9.5h5v5h-5zM4 15h5v5H4zM15 15h5v5h-5z"/></svg></button>
+              <button class="icon-btn" data-tool="crop" title="Обрезка (C)"><svg viewBox="0 0 24 24"><path d="M6 2v16h16"/><path d="M2 6h16v16"/></svg></button>
+            </div>
+            <span class="tools-sep"></span>
+            <div class="ed-colors" id="ed-colors" title="Цвет (1–6)"></div>
+            <span class="tools-sep"></span>
+            <div class="seg small" id="ed-sizes" title="Толщина">
+              <button class="seg-btn" data-size="s">Тонко</button>
+              <button class="seg-btn" data-size="m">Средне</button>
+              <button class="seg-btn" data-size="l">Толсто</button>
+            </div>
+            <span class="tools-sep"></span>
+            <button class="icon-btn" id="ed-undo" title="Отменить (Ctrl+Z)"><svg viewBox="0 0 24 24"><path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></svg></button>
+            <button class="icon-btn" id="ed-redo" title="Вернуть (Ctrl+Y)"><svg viewBox="0 0 24 24"><path d="M15 14l5-5-5-5"/><path d="M20 9H10a6 6 0 0 0 0 12h3"/></svg></button>
+            <div class="spacer"></div>
+            <span class="ed-title" id="ed-title"></span>
+          </div>
+          <div class="ed-stage" id="ed-stage"><canvas id="ed-canvas"></canvas></div>
+          <div class="ed-bottom">
+            <span class="mono muted" id="ed-size-info"></span>
+            <div class="spacer"></div>
+            <div class="row-btns" id="ed-crop-bar" hidden>
+              <span class="muted ed-hint">Выделите нужную область</span>
+              <button class="btn btn-ghost" id="ed-crop-reset">Вся картинка</button>
+              <button class="btn btn-ghost" id="ed-crop-cancel">Отмена</button>
+              <button class="btn btn-accent" id="ed-crop-apply">Обрезать (Enter)</button>
+            </div>
+            <div class="row-btns" id="ed-save-bar">
+              <button class="btn btn-ghost" id="ed-cancel">Закрыть</button>
+              <button class="btn btn-ghost" id="ed-save-replace">Заменить оригинал</button>
+              <button class="btn btn-accent" id="ed-save-copy">Сохранить копию</button>
+            </div>
+          </div>
+        </div>
       </main>
 
       <!-- Сохранение отрезка -->
@@ -338,6 +389,7 @@
           <div class="opt"><div><b>Открыть оверлей</b></div><button class="keybind" data-key="hotkeyOverlay"></button></div>
           <div class="opt"><div><b>Сохранить повтор</b></div><button class="keybind" data-key="hotkeySave"></button></div>
           <div class="opt"><div><b>Скриншот экрана</b></div><button class="keybind" data-key="hotkeyScreenshot"></button></div>
+          <div class="opt"><div><b>Начать / остановить запись</b><small>Полноценная запись в файл, без ограничения по длине</small></div><button class="keybind" data-key="hotkeyRecord"></button></div>
           <p class="muted small-note">Нажмите на клавишу, затем нужное сочетание. Esc — отмена.</p>
           <h3>В редакторе</h3>
           <dl class="keys-ref">
@@ -398,6 +450,8 @@
   </div>
 
   <script src="api.js"></script>
+  <textarea class="ed-text" id="ed-text" rows="1" spellcheck="false" hidden></textarea>
   <script src="app.js"></script>
+  <script src="editor.js"></script>
 </body>
 </html>

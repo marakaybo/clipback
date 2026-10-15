@@ -65,3 +65,22 @@ fn empty_ring() {
     assert!(r.snapshot(None).is_empty());
     assert_eq!(r.duration(), 0.0);
 }
+
+#[test]
+fn recording_starts_from_last_keyframe() {
+    let mut r = Ring::new(60);
+    r.set_audio_tracks(1);
+    filled(&mut r, 3); // кадры 0..29, ключевые 0, 10, 20
+    for pos in (0..3 * 48_000).step_by(1024) {
+        r.push_audio(0, crate::aac::AudioPacket { data: vec![1], pos });
+    }
+    let s = r.since_last_key();
+    assert_eq!(s.video.len(), 10);
+    assert!(s.video[0].key);
+    assert_eq!(s.video[0].pts, 20_000_000);
+    // звук — с запасом в 30 мс до ключевого кадра
+    assert!(s.audio[0].iter().all(|p| audio_time(p.pos) >= 20_000_000 - 300_000));
+    assert!(audio_time(s.audio[0][0].pos) < 20_000_000);
+
+    assert!(Ring::new(60).since_last_key().video.is_empty());
+}

@@ -7,6 +7,7 @@ use crate::convert::{create_frame_texture, Converter};
 use crate::encoder::{Encoder, EncoderSettings};
 use crate::gpu::{self, Gpu};
 use crate::mixer::{self, AudioConfig};
+use crate::live::{LiveRec, Msg};
 use crate::ring::Ring;
 use std::sync::Arc;
 use anyhow::{Context, Result};
@@ -53,6 +54,9 @@ pub enum Command {
     SetBufferLength(u32),
     /// PNG текущего кадра экрана.
     Screenshot { reply: Sender<Result<Vec<u8>, String>> },
+    /// Начать полноценную запись в файл (с последнего ключевого кадра буфера).
+    StartRecord { label: Option<String> },
+    StopRecord,
     Stop,
 }
 
@@ -66,6 +70,10 @@ pub enum Event {
     #[serde(rename_all = "camelCase")]
     Saved { path: PathBuf, seconds: f64, bytes: u64 },
     SaveFailed { message: String },
+    RecordStarted { path: PathBuf },
+    #[serde(rename_all = "camelCase")]
+    Recorded { path: PathBuf, seconds: f64, bytes: u64 },
+    RecordFailed { message: String },
     Error { message: String },
 }
 
@@ -206,12 +214,43 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
     // кадр экрана, который держим до момента выдачи, и было ли уже копирование в этом интервале
     let mut held: Option<ID3D11Texture2D> = None;
     let mut copied = false;
+    // полноценная запись; дописывающиеся файлы ждём при выходе
+    // (объявлены в таком порядке, чтобы при выходе сначала закрылась текущая запись)
+    let mut finishing = Finishing::default();
+    let mut live: Option<LiveRec> = None;
 
     loop {
         // команды
         while let Ok(cmd) = rx.try_recv() {
             match cmd {
-                Command::Stop => return Ok(()),
+                Command::Stop => {
+                    if let Some(l) = live.take() {
+                        drop(l); // ждём, пока файл допишется
+                    }
+                    return Ok(());
+                }
+                Command::StartRecord { label } => {
+                    if live.is_none() {
+                        let base = format!("{} {}", label.as_deref().unwrap_or("Запись"), crate::util::file_stamp());
+                        let path = crate::util::unique_path(&cfg.out_dir, &base, "mp4");
+                        let snap = ring.since_last_key();
+                        let ev = events.clone();
+                        let done: crate::live::Done = Box::new(move |r| {
+                            let _ = match r {
+                                Ok((path, seconds, bytes)) => ev.send(Event::Recorded { path, seconds, bytes }),
+                                Err(e) => ev.send(Event::RecordFailed { message: format!("{e:#}") }),
+                            };
+                        });
+                        let l = LiveRec::start(path.clone(), track_list.clone(), silence.clone(), out_w, out_h, (snap.video, snap.audio), done);
+                        live = Some(l);
+                        let _ = events.send(Event::RecordStarted { path });
+                    }
+                }
+                Command::StopRecord => {
+                    if let Some(t) = live.take().and_then(|l| l.stop()) {
+                        finishing.0.push(t);
+                    }
+                }
                 Command::SetBufferLength(s) => ring.set_length(s),
                 Command::Screenshot { reply } => {
                     let r = if have_frame {
@@ -256,10 +295,14 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
             }
         }
 
-        // готовые пакеты от кодировщиков — в буфер
-        enc.poll(&mut |p| ring.push(p))?;
+        // готовые пакеты от кодировщиков — в буфер (и в файл, если идёт запись)
+        enc.poll(&mut |p| push_video(&mut ring, &live, p))?;
         while let Ok((k, p)) = arx.try_recv() {
-            ring.push_audio(k, p);
+            let p = Arc::new(p);
+            if let Some(l) = &live {
+                l.send(Msg::Audio(k, p.clone()));
+            }
+            ring.push_audio_arc(k, p);
         }
 
         let due = start + Duration::from_nanos(idx as u64 * frame_ns);
@@ -321,7 +364,7 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
         if have_frame && !enc.wants_input() {
             let deadline = Instant::now() + Duration::from_nanos(frame_ns / 3);
             loop {
-                enc.poll(&mut |p| ring.push(p))?;
+                enc.poll(&mut |p| push_video(&mut ring, &live, p))?;
                 if enc.wants_input() || Instant::now() >= deadline {
                     break;
                 }
@@ -364,6 +407,26 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
             }
             encoded_at_status = encoded;
             last_status = Instant::now();
+        }
+    }
+}
+
+fn push_video(ring: &mut Ring, live: &Option<LiveRec>, p: crate::encoder::Packet) {
+    let p = Arc::new(p);
+    if let Some(l) = live {
+        l.send(Msg::Video(p.clone()));
+    }
+    ring.push_arc(p);
+}
+
+/// Файлы записи, которые ещё дописываются: при выходе из захвата их нужно дождаться.
+#[derive(Default)]
+struct Finishing(Vec<std::thread::JoinHandle<()>>);
+
+impl Drop for Finishing {
+    fn drop(&mut self) {
+        for t in self.0.drain(..) {
+            let _ = t.join();
         }
     }
 }
