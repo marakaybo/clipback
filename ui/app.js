@@ -223,6 +223,13 @@ function main() {
       action.hidden = false;
       action.textContent = "Повторить";
       action.onclick = () => call("set_recording", { on: true });
+    } else if (st.diskFree != null && st.diskFree < 2e9) {
+      // мало места — повтор может не сохраниться
+      banner.hidden = false;
+      $("#banner-text").textContent = `На диске с клипами осталось ${mb(st.diskFree)} — новые клипы могут не сохраниться. Освободите место или включите автоочистку.`;
+      action.hidden = false;
+      action.textContent = "Настройки";
+      action.onclick = () => openSettings("storage");
     } else if (st.hotkeyErrors && st.hotkeyErrors.length) {
       banner.hidden = false;
       $("#banner-text").textContent = `Клавиша не работает: ${st.hotkeyErrors.join("; ")}`;
@@ -656,6 +663,9 @@ function main() {
     if (p && S.t >= S.outT - 0.05 && S.t <= S.outT + 0.05) seek(S.inT);
     if (p && S.t >= (c ? c.duration : 0) - 0.05) seek(S.inT);
     S.playing = p;
+    // на паузе во весь экран панель с перемоткой сразу видна
+    if (!p) document.body.classList.remove("fv-idle");
+    else if (document.body.classList.contains("fullview")) fvWake();
     if (p) S.loopSel = S.t >= S.inT - 0.05 && S.t < S.outT;
     if (c && !c.demo) {
       if (p) video.play().catch(() => { S.playing = false; renderPlay(); });
@@ -696,6 +706,12 @@ function main() {
   function setFullView(on) {
     if (on && document.querySelector(".app").classList.contains("no-clip")) return;
     document.body.classList.toggle("fullview", on);
+    // фокус с кнопки снимаем, иначе пробел нажмёт её вместо паузы
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    if (on) {
+      renderFvSeek();
+      fvWake();
+    } else document.body.classList.remove("fv-idle");
     $("#full-icon").innerHTML = on ? fullIcon.on : fullIcon.off;
     $("#btn-full").title = on ? "Выйти из полноэкранного (F, Esc)" : "Во весь экран (F)";
     if (MODE === "window" && window.__TAURI__) {
@@ -703,6 +719,53 @@ function main() {
     }
   }
   const isFullView = () => document.body.classList.contains("fullview");
+
+  // ---------- перемотка во весь экран ----------
+  const fvSeek = $("#fv-seek");
+  function renderFvSeek() {
+    const d = S.clip && S.clip.duration;
+    if (!d) return;
+    const pct = (t) => `${(clamp(t / d, 0, 1) * 100).toFixed(3)}%`;
+    $("#fv-fill").style.width = pct(S.t);
+    $("#fv-knob").style.left = pct(S.t);
+    // выделенный отрезок тоже виден — понятно, что попадёт в сохранение
+    const whole = S.inT <= 0.01 && S.outT >= d - 0.01;
+    $("#fv-sel").style.display = whole ? "none" : "";
+    $("#fv-sel").style.left = pct(S.inT);
+    $("#fv-sel").style.width = pct(S.outT - S.inT);
+  }
+  const fvTime = (e) => {
+    const r = fvSeek.getBoundingClientRect();
+    return clamp((e.clientX - r.left) / r.width, 0, 1) * (S.clip ? S.clip.duration : 0);
+  };
+  fvSeek.addEventListener("pointermove", (e) => {
+    const t = fvTime(e);
+    const tip = $("#fv-tip");
+    tip.textContent = fmt(t, 0);
+    tip.style.left = `${clamp(e.clientX - fvSeek.getBoundingClientRect().left, 24, fvSeek.clientWidth - 24)}px`;
+    if (fvSeek.classList.contains("drag")) seek(t, true);
+  });
+  fvSeek.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    fvSeek.setPointerCapture(e.pointerId);
+    fvSeek.classList.add("drag");
+    seek(fvTime(e), true);
+  });
+  const fvEnd = () => fvSeek.classList.remove("drag");
+  fvSeek.addEventListener("pointerup", fvEnd);
+  fvSeek.addEventListener("pointercancel", fvEnd);
+
+  // панель прячется через 2,5 с без движения мыши (только пока видео играет)
+  let fvIdleTimer = null;
+  function fvWake() {
+    document.body.classList.remove("fv-idle");
+    clearTimeout(fvIdleTimer);
+    if (!isFullView()) return;
+    fvIdleTimer = setTimeout(() => {
+      if (isFullView() && S.playing && !fvSeek.classList.contains("drag")) document.body.classList.add("fv-idle");
+    }, 2500);
+  }
+  addEventListener("pointermove", () => isFullView() && fvWake());
   $("#btn-full").onclick = () => setFullView(!isFullView());
   stage.addEventListener("dblclick", (e) => {
     if (e.target === video || e.target === vc) setFullView(!isFullView());
@@ -1272,6 +1335,7 @@ function main() {
   function updateAll() {
     const c = S.clip;
     $("#tc-cur").textContent = fmt(S.t);
+    if (c && c.kind === "video" && isFullView()) renderFvSeek();
     if (c && c.kind === "video") {
       $("#sel-len").textContent = fmt(S.outT - S.inT, 1);
       $("#sel-range").textContent = `${fmt(S.inT, 1)} — ${fmt(S.outT, 1)}`;

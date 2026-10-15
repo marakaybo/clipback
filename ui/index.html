@@ -140,6 +140,13 @@
             <span class="muted shot-hint">Рисование, текст, стрелки, пикселизация и обрезка</span>
           </div>
 
+          <!-- полоса перемотки — видна во весь экран, где нет таймлайна -->
+          <div class="fv-seek" id="fv-seek">
+            <div class="fv-track"><div class="fv-sel" id="fv-sel"></div><div class="fv-fill" id="fv-fill"></div></div>
+            <div class="fv-knob" id="fv-knob"></div>
+            <div class="fv-tip mono" id="fv-tip"></div>
+          </div>
+
           <div class="controls" id="controls">
             <button class="icon-btn" id="btn-play" title="Пробел"><svg viewBox="0 0 24 24" id="play-icon"><path d="M8 5v14l11-7z"/></svg></button>
             <button class="icon-btn sm" id="btn-back" title="−5 с (←)"><svg viewBox="0 0 24 24"><path d="M11 17l-5-5 5-5M18 17l-5-5 5-5"/></svg></button>

@@ -99,6 +99,8 @@ struct StateDto {
     last_game: Option<String>,
     hotkey_errors: Vec<String>,
     record_started: Option<u64>,
+    /// Свободно на диске с клипами (байты).
+    disk_free: Option<u64>,
     settings: Settings,
     version: &'static str,
     portable: bool,
@@ -114,6 +116,7 @@ fn dto(i: &Inner) -> StateDto {
         last_game: i.last_game.clone(),
         hotkey_errors: i.hotkey_errors.clone(),
         record_started: i.record_started,
+        disk_free: winutil::free_space(&i.settings.out_dir),
         settings: i.settings.clone(),
         version: env!("CARGO_PKG_VERSION"),
         portable: update::is_portable(),
@@ -345,6 +348,17 @@ fn show_indicator(app: &AppHandle, on: bool) {
     let on = on && lock(app).settings.record_indicator;
     if let Err(e) = app.run_on_main_thread(move || indicator::set_visible(on)) {
         log(format!("значок записи: {e}"));
+    }
+}
+
+/// Запись автозапуска в Windows — по настройке. Проверяется при каждом старте:
+/// путь к программе мог измениться (обновление, перенос portable-версии).
+fn sync_autostart(app: &AppHandle) {
+    let want = lock(app).settings.autostart;
+    let al = app.autolaunch();
+    let r = if want { al.enable() } else if al.is_enabled().unwrap_or(false) { al.disable() } else { Ok(()) };
+    if let Err(e) = r {
+        log(format!("автозапуск: {e}"));
     }
 }
 
@@ -1119,6 +1133,13 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_dialog::init())
+        // главное окно открывается там же и того же размера, что в прошлый раз
+        .plugin(
+            tauri_plugin_window_state::Builder::new()
+                .with_denylist(&["overlay", "toast"])
+                .with_state_flags(tauri_plugin_window_state::StateFlags::all() & !tauri_plugin_window_state::StateFlags::VISIBLE)
+                .build(),
+        )
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(update::UpdateState::default())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--minimized"])))
@@ -1149,6 +1170,7 @@ pub fn run() {
             });
 
             create_windows(&handle, start_hidden)?;
+            sync_autostart(&handle);
             build_tray(&handle)?;
             register_hotkeys(&handle);
             if record {

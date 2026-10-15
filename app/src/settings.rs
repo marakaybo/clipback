@@ -92,7 +92,7 @@ impl Default for Settings {
             app_tracks: Vec::new(),
             record_on_start: true,
             close_to_tray: true,
-            autostart: false,
+            autostart: true,
             check_updates: true,
             screenshot_format: "jpg".into(),
             save_sound: true,

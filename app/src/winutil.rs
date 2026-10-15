@@ -24,6 +24,20 @@ fn wide(p: &Path) -> Vec<u16> {
 }
 
 /// Переместить файл в корзину (его можно будет восстановить).
+/// Свободное место на диске, где лежит папка (байты).
+pub fn free_space(dir: &Path) -> Option<u64> {
+    use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    // папки может ещё не быть — смотрим ближайшую существующую
+    let mut d = dir;
+    while !d.exists() {
+        d = d.parent()?;
+    }
+    let w: Vec<u16> = d.as_os_str().encode_wide().chain([0]).collect();
+    let mut free = 0u64;
+    unsafe { GetDiskFreeSpaceExW(PCWSTR(w.as_ptr()), Some(&mut free), None, None).ok()? };
+    Some(free)
+}
+
 pub fn move_to_recycle_bin(path: &Path) -> Result<()> {
     if !path.exists() {
         bail!("файл не найден");
