@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Clipback",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "io.github.clipback",
   "build": {
     "frontendDist": "../ui"
@@ -19,11 +19,46 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico", "icons/icon.png"],
+    "targets": [
+      "nsis"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
     "shortDescription": "Запись последних минут экрана",
     "longDescription": "Clipback держит в памяти последние минуты экрана и сохраняет их по горячей клавише, с обрезкой прямо в программе.",
     "category": "Video",
-    "copyright": "GPL-3.0-or-later"
+    "copyright": "GPL-3.0-or-later",
+    "createUpdaterArtifacts": true,
+    "publisher": "Clipback",
+    "homepage": "https://github.com/marakaybo/clipback",
+    "license": "GPL-3.0-or-later",
+    "licenseFile": "../LICENSE",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": [
+          "Russian",
+          "English"
+        ],
+        "displayLanguageSelector": false,
+        "installerIcon": "icons/icon.ico"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ4Q0JCNEQ3MzQ5ODhCQkIKUldTN2k1ZzAxN1RMMkhkSHVaWHRaVFkyUWl0c0YrVWlMNkUxWS91eEVmU3lsTm1qQ1gvTnIyQkkK",
+      "endpoints": [
+        "https://github.com/marakaybo/clipback/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

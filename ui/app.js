@@ -1152,7 +1152,9 @@ function main() {
     $("#audio-error").hidden = !aerr;
     $("#audio-error").textContent = aerr ? `Звук не пишется: ${aerr}` : "";
 
-    $("#nav-foot").textContent = `Clipback ${st.version}`;
+    $("#set-check-updates").checked = s.checkUpdates;
+    $("#about-kind").textContent = st.portable ? "portable-версия" : "установленная версия";
+    renderUpdate();
     $$(".keybind").forEach((k) => { if (!k.classList.contains("listening")) k.textContent = s[k.dataset.key]; });
     const sel = $("#set-monitor");
     const mons = S.monitors.length ? S.monitors : [{ index: s.monitor, name: `Монитор ${s.monitor + 1}`, width: 0, height: 0 }];
@@ -1179,6 +1181,70 @@ function main() {
   $("#set-record-on-start").addEventListener("change", (e) => saveSettings({ recordOnStart: e.target.checked }));
   $("#set-autostart").addEventListener("change", (e) => saveSettings({ autostart: e.target.checked }));
   $("#set-close-to-tray").addEventListener("change", (e) => saveSettings({ closeToTray: e.target.checked }));
+  $("#set-check-updates").addEventListener("change", (e) => saveSettings({ checkUpdates: e.target.checked }));
+
+  // ---------- обновления ----------
+  // upd.state: idle | checking | none | available | loading | error
+  // var: fillSettings может вызвать renderUpdate раньше, чем дойдёт до этой строки
+  var upd = { state: "idle", info: null, error: "" };
+  function renderUpdate() {
+    if (!upd) return;
+    const v = S.state ? S.state.version : "";
+    const foot = $("#nav-foot");
+    foot.textContent = `Clipback ${v}`;
+    foot.classList.toggle("has-update", upd.state === "available");
+    if (upd.state === "available") foot.textContent += ` · есть ${upd.info.version}`;
+    $("#upd-title").textContent =
+      upd.state === "available" ? `Доступна версия ${upd.info.version}` : upd.state === "loading" ? `Обновление до ${upd.info.version}` : `Версия ${v}`;
+    const notes = {
+      idle: "Проверка ещё не выполнялась",
+      checking: "Проверяю…",
+      none: "Установлена последняя версия",
+      available: upd.info && upd.info.portable ? "Программа заменит себя и перезапустится" : "Откроется установщик, программа перезапустится",
+      loading: "Загрузка обновления…",
+      error: upd.error,
+    };
+    $("#upd-note").textContent = notes[upd.state];
+    $("#upd-check").disabled = upd.state === "checking" || upd.state === "loading";
+    $("#upd-install").hidden = !(upd.state === "available" || upd.state === "loading");
+    $("#upd-install").disabled = upd.state === "loading";
+    if (upd.state !== "loading") $("#upd-progress").hidden = true;
+  }
+  async function checkUpdate() {
+    upd.state = "checking";
+    renderUpdate();
+    try {
+      upd.info = await api.call("check_update");
+      upd.state = upd.info ? "available" : "none";
+    } catch (e) {
+      upd.state = "error";
+      upd.error = String(e);
+    }
+    renderUpdate();
+  }
+  $("#upd-check").onclick = checkUpdate;
+  $("#upd-install").onclick = async () => {
+    upd.state = "loading";
+    renderUpdate();
+    $("#upd-progress").hidden = false;
+    try {
+      await api.call("install_update");
+    } catch (e) {
+      upd.state = "error";
+      upd.error = String(e);
+      renderUpdate();
+    }
+  };
+  api.on("update-progress", (p) => {
+    if (p.total) $("#upd-progress").firstElementChild.style.width = `${Math.round((p.done / p.total) * 100)}%`;
+  });
+  api.on("update-available", (info) => {
+    upd.info = info;
+    upd.state = "available";
+    renderUpdate();
+    if (MODE === "window") toast(`Доступна версия ${info.version}`, "Обновить можно в настройках → Программа", "info");
+  });
+  $("#nav-foot").addEventListener("click", () => { if (upd.state === "available") openSettings("app"); });
   $("#set-monitor").addEventListener("change", (e) => saveSettings({ monitor: +e.target.value }));
   $("#set-height").addEventListener("change", (e) => saveSettings({ maxHeight: e.target.value ? +e.target.value : null }));
   $$("#set-fps .seg-btn").forEach((b) => b.addEventListener("click", () => saveSettings({ fps: +b.dataset.v })));

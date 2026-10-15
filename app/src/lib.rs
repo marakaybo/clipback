@@ -3,6 +3,7 @@
 
 mod clips;
 mod settings;
+mod update;
 mod winutil;
 
 use base64::Engine;
@@ -89,6 +90,7 @@ struct StateDto {
     hotkey_errors: Vec<String>,
     settings: Settings,
     version: &'static str,
+    portable: bool,
 }
 
 fn dto(i: &Inner) -> StateDto {
@@ -102,6 +104,7 @@ fn dto(i: &Inner) -> StateDto {
         hotkey_errors: i.hotkey_errors.clone(),
         settings: i.settings.clone(),
         version: env!("CARGO_PKG_VERSION"),
+        portable: update::is_portable(),
     }
 }
 
@@ -826,8 +829,16 @@ fn quit_app(app: AppHandle) {
 
 // ---------- запуск ----------
 
+/// Остановить запись перед выходом (обычным или ради обновления).
+fn stop_for_exit(app: &AppHandle) {
+    let rec = lock(app).recorder.take();
+    drop(rec);
+}
+
 pub fn run() {
-    let start_hidden = std::env::args().any(|a| a == "--minimized");
+    let args: Vec<String> = std::env::args().collect();
+    update::finish_previous(&args);
+    let start_hidden = args.iter().any(|a| a == "--minimized");
 
     tauri::Builder::default()
         // второй запуск просто показывает уже открытое окно
@@ -842,6 +853,8 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(update::UpdateState::default())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--minimized"])))
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -875,6 +888,9 @@ pub fn run() {
             } else {
                 emit_state(&handle);
             }
+            if lock(&handle).settings.check_updates {
+                update::check_on_start(handle.clone());
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -900,14 +916,15 @@ pub fn run() {
             show_main_cmd,
             frontend_log,
             quit_app,
+            update::check_update,
+            update::install_update,
         ])
         .build(tauri::generate_context!())
         .expect("не удалось запустить Clipback")
         .run(|app, e| {
             if let tauri::RunEvent::Exit = e {
                 // корректно останавливаем захват
-                let rec = lock(app).recorder.take();
-                drop(rec);
+                stop_for_exit(app);
                 log("выход");
             }
         });

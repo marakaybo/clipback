@@ -349,6 +349,7 @@
             <dt>Сохранить кадр</dt><dd>S</dd>
             <dt>Сохранить отрезок</dt><dd>Ctrl + S</dd>
             <dt>Звук вкл / выкл</dt><dd>M</dd>
+            <dt>Во весь экран</dt><dd>F</dd>
             <dt>В корзину</dt><dd>Delete</dd>
             <dt>Закрыть оверлей</dt><dd>Esc</dd>
           </dl>
@@ -377,7 +378,20 @@
             <div><b>Выйти из Clipback</b><small>Запись остановится</small></div>
             <button class="btn btn-ghost" id="btn-quit">Выйти</button>
           </div>
-          <p class="muted small-note" id="about">Clipback · открытый код · GPL-3.0</p>
+          <h3>Обновления</h3>
+          <div class="opt">
+            <div><b id="upd-title">Версия</b><small id="upd-note">Проверка ещё не выполнялась</small></div>
+            <div class="row-btns">
+              <button class="btn btn-ghost" id="upd-check">Проверить</button>
+              <button class="btn btn-primary" id="upd-install" hidden>Обновить</button>
+            </div>
+          </div>
+          <div class="progress" id="upd-progress" hidden><div class="progress-fill"></div></div>
+          <div class="opt">
+            <div><b>Проверять при запуске</b><small>Только проверка — без вашего согласия ничего не скачивается</small></div>
+            <label class="switch"><input type="checkbox" id="set-check-updates"><span></span></label>
+          </div>
+          <p class="muted small-note" id="about">Clipback · открытый код · GPL-3.0 · <span id="about-kind"></span></p>
         </section>
       </div>
     </div>

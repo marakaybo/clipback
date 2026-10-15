@@ -438,6 +438,9 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 12px;
 .nav-item.active { background: var(--s4); color: var(--text); }
 .nav-sep { flex: 1; }
 .nav-foot { font-size: var(--fs-xs); color: var(--text-3); padding: 0 10px; }
+.nav-foot.has-update { color: var(--accent); cursor: pointer; }
+.nav-foot.has-update:hover { text-decoration: underline; }
+#upd-progress { margin: 0 0 10px; }
 .modal-body { position: relative; padding: 20px 28px; overflow-y: auto; }
 .modal-close { position: absolute; top: 12px; right: 12px; }
 .modal-body h2 { margin: 0 0 12px; font-size: var(--fs-lg); font-weight: 600; }

@@ -68,13 +68,13 @@
     hotkeyOverlay: "Alt+Z", hotkeySave: "Alt+F10", hotkeyScreenshot: "Alt+F1",
     systemAudio: true, mic: true, micDevice: null, micGain: 1, audioMode: "advanced", customBitrate: 12,
     appTracks: [{ name: "Discord", exe: "Discord.exe", enabled: true }],
-    recordOnStart: true, closeToTray: true, autostart: false,
+    recordOnStart: true, closeToTray: true, autostart: false, checkUpdates: true,
   };
   const state = {
     recording: true, starting: false,
     capture: { encoder: "NVIDIA H.264 Encoder MFT", gpu: "NVIDIA GeForce RTX 5060 Ti", monitor: "DISPLAY1", width: 2560, height: 1440, fps: 60, audio: ["Всё вместе", "Звук системы", "Микрофон"], audioError: null },
     status: { bufferedSecs: 0, bufferBytes: 0, fps: 60, dropped: 0 },
-    error: null, lastGame: "Battlefield 6", hotkeyErrors: [], settings, version: "0.1.0",
+    error: null, lastGame: "Battlefield 6", hotkeyErrors: [], settings, version: "0.1.0", portable: true,
   };
   const started = Date.now();
   setInterval(() => {
@@ -88,6 +88,15 @@
 
   const handlers = {
     get_state: () => state,
+    check_update: () => new Promise((r) => setTimeout(() => r({ version: "0.2.0", notes: "", portable: true }), 600)),
+    install_update: () => new Promise((r) => {
+      let done = 0;
+      const t = setInterval(() => {
+        done += 1.5e6;
+        emit("update-progress", { done: Math.min(done, 11e6), total: 11e6 });
+        if (done >= 11e6) { clearInterval(t); r(); }
+      }, 120);
+    }),
     list_clips: () => clips.slice().sort((a, b) => b.modified - a.modified),
     list_monitors: () => [{ index: 0, name: "DISPLAY1", width: 2560, height: 1440 }],
     list_mics: () => [

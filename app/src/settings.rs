@@ -50,6 +50,8 @@ pub struct Settings {
     /// Крестик прячет окно в трей, а не закрывает программу.
     pub close_to_tray: bool,
     pub autostart: bool,
+    /// Проверять новую версию при запуске.
+    pub check_updates: bool,
 }
 
 impl Default for Settings {
@@ -74,6 +76,7 @@ impl Default for Settings {
             record_on_start: true,
             close_to_tray: true,
             autostart: false,
+            check_updates: true,
         }
     }
 }
