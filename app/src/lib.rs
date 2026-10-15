@@ -2,7 +2,10 @@
 //! Запись идёт в ядре (`clipback-core`), здесь — управление им и интерфейс.
 
 mod clips;
+mod indicator;
+mod library;
 mod settings;
+mod sound;
 mod update;
 mod winutil;
 
@@ -82,6 +85,7 @@ struct AppState {
     peaks: Mutex<std::collections::HashMap<String, Vec<Vec<f32>>>>,
     rec_item: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
     record_item: Mutex<Option<MenuItem<tauri::Wry>>>,
+    favorites: Mutex<library::Favorites>,
 }
 
 #[derive(Serialize, Clone)]
@@ -177,6 +181,7 @@ fn capture_config(s: &Settings) -> Config {
         out_dir: s.out_dir.clone(),
         max_height: s.max_height,
         audio: s.audio_config(),
+        cursor: s.record_cursor,
     }
 }
 
@@ -240,6 +245,7 @@ fn stop_recording(app: &AppHandle) {
         i.recorder.take()
     };
     st(app).generation.fetch_add(1, Ordering::SeqCst);
+    show_indicator(app, false);
     // остановка ждёт поток захвата (и дописывание файла записи) — делаем это вне блокировки
     drop(rec);
     log("запись остановлена");
@@ -267,6 +273,8 @@ fn forward_events(app: AppHandle, events: mpsc::Receiver<Event>, generation: u64
                 clips_changed(&app);
                 let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
                 let _ = app.emit("clip-saved", path.to_string_lossy().to_string());
+                cue(&app, sound::Cue::Saved);
+                auto_clean_later(&app);
                 show_toast(&app, "Повтор сохранён", &format!("{} · {}", fmt_secs(seconds), name), "replay");
             }
             Event::SaveFailed { message } => {
@@ -281,20 +289,26 @@ fn forward_events(app: AppHandle, events: mpsc::Receiver<Event>, generation: u64
                     i.settings.hotkey_record.clone()
                 };
                 emit_state(&app);
+                show_indicator(&app, true);
+                cue(&app, sound::Cue::RecordStart);
                 show_toast(&app, "Запись началась", &format!("{key} — остановить"), "rec");
             }
             Event::Recorded { path, seconds, bytes } => {
                 log(format!("запись сохранена {:.1} с, {} байт: {}", seconds, bytes, path.display()));
                 lock(&app).record_started = None;
+                show_indicator(&app, false);
                 emit_state(&app);
                 clips_changed(&app);
                 let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
                 let _ = app.emit("clip-saved", path.to_string_lossy().to_string());
+                cue(&app, sound::Cue::RecordStop);
+                auto_clean_later(&app);
                 show_toast(&app, "Запись сохранена", &format!("{} · {}", fmt_secs(seconds), name), "rec");
             }
             Event::RecordFailed { message } => {
                 log(format!("запись не удалась: {message}"));
                 lock(&app).record_started = None;
+                show_indicator(&app, false);
                 emit_state(&app);
                 show_toast(&app, "Запись не удалась", &message, "error");
             }
@@ -307,6 +321,7 @@ fn forward_events(app: AppHandle, events: mpsc::Receiver<Event>, generation: u64
                     i.record_started = None;
                     i.recorder.take()
                 };
+                show_indicator(&app, false);
                 drop(rec);
                 emit_state(&app);
                 show_toast(&app, "Запись остановилась", &message, "error");
@@ -323,6 +338,20 @@ fn fmt_secs(s: f64) -> String {
         return format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60);
     }
     format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// Значок записи в углу: окно живёт в главном потоке программы.
+fn show_indicator(app: &AppHandle, on: bool) {
+    let on = on && lock(app).settings.record_indicator;
+    if let Err(e) = app.run_on_main_thread(move || indicator::set_visible(on)) {
+        log(format!("значок записи: {e}"));
+    }
+}
+
+fn cue(app: &AppHandle, c: sound::Cue) {
+    if lock(app).settings.save_sound {
+        sound::play(c);
+    }
 }
 
 fn now_ms() -> u64 {
@@ -375,14 +404,15 @@ fn save_replay(app: &AppHandle) {
 fn take_screenshot(app: &AppHandle) -> Result<clips::ClipEntry, String> {
     let label = current_game_label(app).unwrap_or_else(|| "Скриншот".into());
     let (tx, rx) = mpsc::channel();
-    let dir = {
+    let (dir, jpeg) = {
         let i = lock(app);
         let r = i.recorder.as_ref().ok_or("запись выключена — скриншот берётся из захвата экрана")?;
         r.sender().send(Command::Screenshot { reply: tx }).map_err(|e| e.to_string())?;
-        i.settings.out_dir.clone()
+        (i.settings.out_dir.clone(), i.settings.screenshot_format != "png")
     };
-    let png = rx.recv_timeout(Duration::from_secs(5)).map_err(|_| "захват не ответил".to_string())??;
-    let e = clips::save_png(&dir, &label, &png).map_err(|e| format!("{e:#}"))?;
+    let raw = rx.recv_timeout(Duration::from_secs(5)).map_err(|_| "захват не ответил".to_string())??;
+    let (data, _) = clipback_core::shot::encode(&raw, jpeg).map_err(|e| format!("{e:#}"))?;
+    let e = clips::save_image(&dir, &label, &data).map_err(|e| format!("{e:#}"))?;
     log(format!("скриншот: {}", e.path));
     clips_changed(app);
     Ok(e)
@@ -541,6 +571,11 @@ fn create_windows(app: &AppHandle, start_hidden: bool) -> tauri::Result<()> {
     let _ = toast.hide();
     if let Ok(h) = toast.hwnd() {
         winutil::make_passive(h.0 as isize);
+        indicator::exclude_from_capture(h.0 as isize);
+    }
+    // оверлей не должен попадать в повтор и скриншоты
+    if let Ok(h) = overlay.hwnd() {
+        indicator::exclude_from_capture(h.0 as isize);
     }
     Ok(())
 }
@@ -650,7 +685,10 @@ fn on_hotkey(app: &AppHandle, sc: &Shortcut) {
         Some(Action::Screenshot) => {
             let app = app.clone();
             std::thread::spawn(move || match take_screenshot(&app) {
-                Ok(e) => show_toast(&app, "Скриншот сохранён", &e.name, "camera"),
+                Ok(e) => {
+                    cue(&app, sound::Cue::Saved);
+                    show_toast(&app, "Скриншот сохранён", &e.name, "camera")
+                }
                 Err(e) => show_toast(&app, "Скриншот не получился", &e, "error"),
             });
         }
@@ -706,7 +744,75 @@ async fn screenshot(app: AppHandle) -> Res<clips::ClipEntry> {
 #[tauri::command]
 async fn list_clips(app: AppHandle) -> Vec<clips::ClipEntry> {
     let dir = out_dir(&app);
-    clips::list(&dir)
+    let mut l = clips::list(&dir);
+    favs(&app).mark(&mut l);
+    l
+}
+
+fn favs(app: &AppHandle) -> std::sync::MutexGuard<'_, library::Favorites> {
+    st(app).favorites.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[tauri::command]
+fn set_favorite(app: AppHandle, path: String, on: bool) -> Res<()> {
+    let p = checked_path(&app, &path)?;
+    favs(&app).set(&p, on);
+    clips_changed(&app);
+    Ok(())
+}
+
+/// Автоочистка: самые старые клипы — в корзину, пока папка не уложится в лимиты.
+fn auto_clean(app: &AppHandle) {
+    let s = lock(app).settings.clone();
+    if !s.auto_clean || (s.clean_max_gb == 0 && s.clean_max_days == 0) {
+        return;
+    }
+    let mut l = clips::list(&s.out_dir);
+    favs(app).mark(&mut l);
+    let max_bytes = (s.clean_max_gb > 0).then(|| s.clean_max_gb as u64 * 1_000_000_000);
+    let max_days = (s.clean_max_days > 0).then_some(s.clean_max_days);
+    let plan = library::clean_plan(&l, max_bytes, max_days, now_ms());
+    if plan.is_empty() {
+        return;
+    }
+    let (mut n, mut bytes) = (0, 0u64);
+    for p in &plan {
+        let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        match winutil::move_to_recycle_bin(p) {
+            Ok(()) => {
+                n += 1;
+                bytes += size;
+                log(format!("автоочистка: в корзину {}", p.display()));
+            }
+            Err(e) => log(format!("автоочистка: {} — {e:#}", p.display())),
+        }
+    }
+    if n > 0 {
+        clips_changed(app);
+        show_toast(app, "Автоочистка", &format!("В корзину: {n} шт., {:.1} ГБ", bytes as f64 / 1e9), "trash");
+    }
+}
+
+#[derive(Serialize)]
+struct CleanPreview {
+    count: usize,
+    bytes: u64,
+}
+
+/// Сколько клипов автоочистка уберёт прямо сейчас при таких лимитах — для подтверждения в настройках.
+#[tauri::command]
+async fn clean_preview(app: AppHandle, max_gb: u32, max_days: u32) -> CleanPreview {
+    let dir = out_dir(&app);
+    let mut l = clips::list(&dir);
+    favs(&app).mark(&mut l);
+    let plan = library::clean_plan(&l, (max_gb > 0).then(|| max_gb as u64 * 1_000_000_000), (max_days > 0).then_some(max_days), now_ms());
+    let bytes = l.iter().filter(|e| plan.iter().any(|p| Path::new(&e.path) == p)).map(|e| e.size).sum();
+    CleanPreview { count: plan.len(), bytes }
+}
+
+fn auto_clean_later(app: &AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || auto_clean(&app));
 }
 
 #[tauri::command]
@@ -751,6 +857,7 @@ async fn trim_clip(
 async fn rename_clip(app: AppHandle, path: String, name: String) -> Res<clips::ClipEntry> {
     let p = checked_path(&app, &path)?;
     let e = clips::rename(&p, &name).map_err(|e| format!("{e:#}"))?;
+    favs(&app).renamed(&p, Path::new(&e.path));
     clips_changed(&app);
     Ok(e)
 }
@@ -759,24 +866,85 @@ async fn rename_clip(app: AppHandle, path: String, name: String) -> Res<clips::C
 async fn delete_clip(app: AppHandle, path: String) -> Res<()> {
     let p = checked_path(&app, &path)?;
     winutil::move_to_recycle_bin(&p).map_err(|e| format!("{e:#}"))?;
+    favs(&app).set(&p, false);
     log(format!("в корзину: {}", p.display()));
     clips_changed(&app);
     Ok(())
 }
 
 #[tauri::command]
-async fn reveal_clip(app: AppHandle, path: String) -> Res<()> {
+async fn reveal_clip(app: AppHandle, window: tauri::Window, path: String) -> Res<()> {
     let p = checked_path(&app, &path)?;
+    leave_overlay_for_explorer(&app, &window);
     winutil::reveal_in_explorer(&p).map_err(|e| format!("{e:#}"))
 }
 
+/// Проводник открывается под оверлеем (тот всегда сверху) — поэтому оверлей сначала убираем.
+fn leave_overlay_for_explorer(app: &AppHandle, window: &tauri::Window) {
+    if window.label() == "overlay" {
+        hide_overlay(app);
+    }
+}
+
 #[tauri::command]
-fn open_clips_folder(app: AppHandle) -> Res<()> {
+fn open_clips_folder(app: AppHandle, window: tauri::Window) -> Res<()> {
     let dir = out_dir(&app);
+    leave_overlay_for_explorer(&app, &window);
     std::fs::create_dir_all(&dir).map_err(err)?;
     std::process::Command::new("explorer").arg(&dir).spawn().map_err(err)?;
     Ok(())
 }
+
+/// Перетаскивание клипа из Clipback в другую программу (Discord, Telegram, проводник).
+/// В оверлее окно на время перетаскивания прячется, чтобы было куда бросить;
+/// если клип никуда не бросили — оверлей возвращается.
+#[tauri::command]
+fn start_drag(app: AppHandle, window: tauri::Window, path: String, icon_png_base64: Option<String>) -> Res<()> {
+    let p = checked_path(&app, &path)?;
+    let icon = icon_png_base64
+        .and_then(|b| base64::engine::general_purpose::STANDARD.decode(b.as_bytes()).ok())
+        .filter(|b| b.starts_with(&[0x89, b'P', b'N', b'G']))
+        .unwrap_or_else(|| TRANSPARENT_PNG.to_vec());
+    let label = window.label().to_string();
+    let from_overlay = label == "overlay";
+    if from_overlay {
+        if let Some(w) = app.get_webview_window("overlay") {
+            let _ = w.hide();
+        }
+    }
+    let a = app.clone();
+    app.run_on_main_thread(move || {
+        let Some(w) = a.get_webview_window(&label) else { return };
+        let a2 = a.clone();
+        let r = drag::start_drag(
+            &w,
+            drag::DragItem::Files(vec![p]),
+            drag::Image::Raw(icon),
+            move |result, _| {
+                let dropped = matches!(result, drag::DragResult::Dropped);
+                if from_overlay && !dropped {
+                    toggle_overlay(&a2);
+                }
+                let _ = a2.emit("drag-done", dropped);
+            },
+            drag::Options::default(),
+        );
+        if let Err(e) = r {
+            log(format!("перетаскивание: {e}"));
+            if from_overlay {
+                toggle_overlay(&a);
+            }
+        }
+    })
+    .map_err(err)
+}
+
+/// Прозрачная картинка 1×1 — если интерфейс не прислал миниатюру.
+const TRANSPARENT_PNG: &[u8] = &[
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00, 0x01,
+    0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+];
 
 #[tauri::command]
 async fn copy_clip(app: AppHandle, path: String) -> Res<()> {
@@ -789,7 +957,7 @@ async fn copy_clip(app: AppHandle, path: String) -> Res<()> {
 async fn save_frame(app: AppHandle, png_base64: String, label: Option<String>) -> Res<clips::ClipEntry> {
     let data = base64::engine::general_purpose::STANDARD.decode(png_base64.as_bytes()).map_err(err)?;
     let label = label.and_then(|l| clips::clean_name(&l).ok()).unwrap_or_else(|| "Кадр".into());
-    let e = clips::save_png(&out_dir(&app), &label, &data).map_err(|e| format!("{e:#}"))?;
+    let e = clips::save_image(&out_dir(&app), &label, &data).map_err(|e| format!("{e:#}"))?;
     clips_changed(&app);
     Ok(e)
 }
@@ -823,6 +991,9 @@ fn set_settings(app: AppHandle, settings: Settings) -> Res<Settings> {
         != (&new.hotkey_overlay, &new.hotkey_save, &new.hotkey_screenshot, &new.hotkey_record)
     {
         register_hotkeys(&app);
+    }
+    if new.auto_clean && (!old.auto_clean || old.clean_max_gb != new.clean_max_gb || old.clean_max_days != new.clean_max_days) {
+        auto_clean_later(&app);
     }
     if old.autostart != new.autostart {
         let al = app.autolaunch();
@@ -891,9 +1062,14 @@ async fn list_mics() -> Res<Vec<clipback_core::audio::Device>> {
 }
 
 #[tauri::command]
-async fn pick_folder(app: AppHandle) -> Option<String> {
+async fn pick_folder(app: AppHandle, window: tauri::Window) -> Option<String> {
     let start = out_dir(&app);
-    app.dialog().file().set_directory(start).blocking_pick_folder().and_then(|p| p.into_path().ok()).map(|p| p.to_string_lossy().into_owned())
+    // окно выбора привязано к окну, из которого его открыли, — поверх оверлея, а не под ним
+    let mut d = app.dialog().file().set_directory(start);
+    if let Some(w) = app.get_webview_window(window.label()) {
+        d = d.set_parent(&w);
+    }
+    d.blocking_pick_folder().and_then(|p| p.into_path().ok()).map(|p| p.to_string_lossy().into_owned())
 }
 
 #[tauri::command]
@@ -969,6 +1145,7 @@ pub fn run() {
                 peaks: Mutex::new(Default::default()),
                 rec_item: Mutex::new(None),
             record_item: Mutex::new(None),
+            favorites: Mutex::new(library::Favorites::load(cfg_dir.join("favorites.json"))),
             });
 
             create_windows(&handle, start_hidden)?;
@@ -982,6 +1159,13 @@ pub fn run() {
             if lock(&handle).settings.check_updates {
                 update::check_on_start(handle.clone());
             }
+            // автоочистка: через минуту после запуска и дальше раз в полчаса
+            let h = handle.clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(Duration::from_secs(60));
+                auto_clean(&h);
+                std::thread::sleep(Duration::from_secs(29 * 60));
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -997,6 +1181,9 @@ pub fn run() {
             reveal_clip,
             open_clips_folder,
             copy_clip,
+            start_drag,
+            set_favorite,
+            clean_preview,
             save_frame,
             save_edited_image,
             set_settings,
@@ -1011,6 +1198,7 @@ pub fn run() {
             quit_app,
             update::check_update,
             update::install_update,
+            update::take_whats_new,
         ])
         .build(tauri::generate_context!())
         .expect("не удалось запустить Clipback")

@@ -68,7 +68,7 @@
     hotkeyOverlay: "Alt+Z", hotkeySave: "Alt+F10", hotkeyScreenshot: "Alt+F1", hotkeyRecord: "Alt+F9",
     systemAudio: true, mic: true, micDevice: null, micGain: 1, audioMode: "advanced", customBitrate: 12,
     appTracks: [{ name: "Discord", exe: "Discord.exe", enabled: true }],
-    recordOnStart: true, closeToTray: true, autostart: false, checkUpdates: true,
+    recordOnStart: true, closeToTray: true, autostart: false, checkUpdates: true, screenshotFormat: "jpg", saveSound: true, recordIndicator: true, recordCursor: true, autoClean: false, cleanMaxGb: 50, cleanMaxDays: 0,
   };
   const state = {
     recording: true, starting: false,
@@ -100,7 +100,10 @@
       state.recordStarted = state.recordStarted ? null : Date.now();
       emit("state", state);
     },
-    check_update: () => new Promise((r) => setTimeout(() => r({ version: "0.2.0", notes: "", portable: true }), 600)),
+    check_update: () => new Promise((r) => setTimeout(() => r({ version: "0.4.0", notes: "**Новое**\n- **Перетаскивание** клипа в Discord\n- Сжатие под лимит `Discord`\n  - 10, 20, 50 или 500 МБ\n\n**Исправлено**\n- Папка открывается поверх оверлея", portable: true }), 600)),
+    take_whats_new: () => null,
+    set_favorite: ({ path, on }) => { find(path).favorite = on; },
+    clean_preview: ({ maxGb }) => ({ count: maxGb && maxGb < 5 ? 3 : 0, bytes: 2.1e9 }),
     install_update: () => new Promise((r) => {
       let done = 0;
       const t = setInterval(() => {

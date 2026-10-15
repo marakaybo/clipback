@@ -54,6 +54,20 @@ pub struct Settings {
     pub autostart: bool,
     /// Проверять новую версию при запуске.
     pub check_updates: bool,
+    /// Формат скриншотов: "jpg" (легче) или "png" (без потерь).
+    pub screenshot_format: String,
+    /// Тихий щелчок при сохранении повтора, скриншота и начале/конце записи.
+    pub save_sound: bool,
+    /// Полупрозрачный значок в углу экрана, пока идёт запись.
+    pub record_indicator: bool,
+    /// Курсор мыши в записи.
+    pub record_cursor: bool,
+    /// Автоочистка папки клипов (по умолчанию выключена).
+    pub auto_clean: bool,
+    /// Держать папку не больше стольких ГБ (0 — без лимита).
+    pub clean_max_gb: u32,
+    /// Убирать клипы старше стольких дней (0 — не смотреть на возраст).
+    pub clean_max_days: u32,
 }
 
 impl Default for Settings {
@@ -80,6 +94,13 @@ impl Default for Settings {
             close_to_tray: true,
             autostart: false,
             check_updates: true,
+            screenshot_format: "jpg".into(),
+            save_sound: true,
+            record_indicator: true,
+            record_cursor: true,
+            auto_clean: false,
+            clean_max_gb: 50,
+            clean_max_days: 0,
         }
     }
 }
@@ -112,6 +133,8 @@ impl Settings {
             self.quality = "high".into();
         }
         self.custom_bitrate = self.custom_bitrate.clamp(2, 80);
+        self.clean_max_gb = self.clean_max_gb.min(10_000);
+        self.clean_max_days = self.clean_max_days.min(3650);
         if !self.mic_gain.is_finite() {
             self.mic_gain = 1.0;
         }
@@ -183,6 +206,7 @@ impl Settings {
             || self.mic_gain != other.mic_gain
             || self.audio_mode != other.audio_mode
             || self.app_tracks != other.app_tracks
+            || self.record_cursor != other.record_cursor
     }
 
     /// Настройки звука для ядра.

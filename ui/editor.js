@@ -648,6 +648,7 @@
     E.drag = null;
     E.cropDraft = null;
     E.onSave = opts.onSave;
+    E.jpeg = !!opts.jpeg; // сохраняем в том же формате, что и исходник
     E.onClose = opts.onClose;
     rebuild();
     root.hidden = false;
@@ -681,7 +682,7 @@
         r.onload = () => res(String(r.result).split(",")[1]);
         r.onerror = () => rej("не удалось прочитать картинку");
         r.readAsDataURL(b);
-      }, "image/png")
+      }, E.jpeg ? "image/jpeg" : "image/png", 0.92)
     );
   }
 

@@ -1,4 +1,6 @@
-//! Скриншот текущего кадра: копия текстуры с видеокарты в память и PNG.
+//! Скриншот текущего кадра: копия текстуры с видеокарты в память, затем PNG или JPEG.
+//! Поток захвата только забирает пиксели, а сжатие делает тот, кто попросил снимок, —
+//! так кодирование картинки не задерживает запись.
 
 use crate::capture::texture_desc;
 use crate::gpu::Gpu;
@@ -7,7 +9,14 @@ use windows::Win32::Graphics::Direct3D11::{
     ID3D11Texture2D, D3D11_CPU_ACCESS_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
 };
 
-pub fn grab_png(g: &Gpu, frame: &ID3D11Texture2D) -> Result<Vec<u8>> {
+/// Несжатый кадр, RGBA.
+pub struct RawImage {
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
+pub fn grab(g: &Gpu, frame: &ID3D11Texture2D) -> Result<RawImage> {
     let d = texture_desc(frame);
     let desc = D3D11_TEXTURE2D_DESC {
         Usage: D3D11_USAGE_STAGING,
@@ -41,7 +50,24 @@ pub fn grab_png(g: &Gpu, frame: &ID3D11Texture2D) -> Result<Vec<u8>> {
         }
         g.context.Unmap(&staging, 0);
     }
-    encode_png(&rgba, w as u32, h as u32)
+    Ok(RawImage { rgba, width: w as u32, height: h as u32 })
+}
+
+/// Сжать кадр: `jpeg` — JPEG (качество 92, в 5–10 раз легче), иначе PNG без потерь.
+/// Возвращает данные и расширение файла.
+pub fn encode(img: &RawImage, jpeg: bool) -> Result<(Vec<u8>, &'static str)> {
+    if jpeg {
+        Ok((encode_jpeg(&img.rgba, img.width, img.height, 92)?, "jpg"))
+    } else {
+        Ok((encode_png(&img.rgba, img.width, img.height)?, "png"))
+    }
+}
+
+pub fn encode_jpeg(rgba: &[u8], w: u32, h: u32, quality: u8) -> Result<Vec<u8>> {
+    let (w16, h16) = (u16::try_from(w).context("слишком широкая картинка")?, u16::try_from(h).context("слишком высокая картинка")?);
+    let mut out = Vec::new();
+    jpeg_encoder::Encoder::new(&mut out, quality).encode(rgba, w16, h16, jpeg_encoder::ColorType::Rgba)?;
+    Ok(out)
 }
 
 pub fn encode_png(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>> {
@@ -58,13 +84,49 @@ pub fn encode_png(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Формат картинки по первым байтам: "png", "jpg" или None.
+pub fn image_kind(data: &[u8]) -> Option<&'static str> {
+    if data.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("png")
+    } else if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("jpg")
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn encodes_valid_png() {
-        let png = super::encode_png(&[255, 0, 0, 255, 0, 255, 0, 255], 2, 1).unwrap();
+        let png = encode_png(&[255, 0, 0, 255, 0, 255, 0, 255], 2, 1).unwrap();
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
         assert_eq!(u32::from_be_bytes(png[16..20].try_into().unwrap()), 2);
         assert_eq!(u32::from_be_bytes(png[20..24].try_into().unwrap()), 1);
+        assert_eq!(image_kind(&png), Some("png"));
+    }
+
+    #[test]
+    fn jpeg_is_much_smaller_on_photo_like_content() {
+        // плавный градиент с шумом — как кадр из игры
+        let (w, h) = (320u32, 180u32);
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        let mut seed = 7u32;
+        for y in 0..h {
+            for x in 0..w {
+                seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                let n = (seed >> 24) as u8 / 8;
+                rgba.extend_from_slice(&[(x * 255 / w) as u8 + n, (y * 255 / h) as u8, 128 + n, 255]);
+            }
+        }
+        let img = RawImage { rgba, width: w, height: h };
+        let (jpg, ext) = encode(&img, true).unwrap();
+        let (png, _) = encode(&img, false).unwrap();
+        assert_eq!(ext, "jpg");
+        assert_eq!(image_kind(&jpg), Some("jpg"));
+        assert!(jpg.len() * 3 < png.len(), "jpg {} png {}", jpg.len(), png.len());
+        assert_eq!(image_kind(b"GIF89a"), None);
     }
 }

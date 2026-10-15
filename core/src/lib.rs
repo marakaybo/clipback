@@ -9,6 +9,7 @@ pub mod aac;
 pub mod audio;
 pub mod capture;
 pub mod convert;
+pub mod cursor;
 pub mod encoder;
 pub mod gpu;
 pub mod hotkey;

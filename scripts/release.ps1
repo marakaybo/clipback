@@ -2,6 +2,8 @@
 #
 #   .\scripts\release.ps1             — собрать всё в dist\
 #   .\scripts\release.ps1 -Publish    — собрать и выложить релиз на GitHub (нужен gh)
+#   -NotesFile notes.md                — «что нового»: попадает и на страницу релиза,
+#                                        и в окно обновления внутри программы
 #
 # Версия берётся из app\tauri.conf.json — перед выпуском поменяйте её там,
 # в app\Cargo.toml и core\Cargo.toml.
@@ -14,13 +16,16 @@ param(
     [switch]$Publish,
     [string]$Key = "$env:USERPROFILE\.tauri\clipback.key",
     [string]$Repo = "marakaybo/clipback",
-    [string]$Notes = ""
+    [string]$Notes = "",
+    [string]$NotesFile = ""
 )
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $app = Join-Path $root "app"
 $dist = Join-Path $root "dist"
+
+if ($NotesFile) { $Notes = (Get-Content $NotesFile -Raw -Encoding UTF8).Trim() }
 
 $version = (Get-Content (Join-Path $app "tauri.conf.json") -Raw | ConvertFrom-Json).version
 $tag = "v$version"
@@ -78,6 +83,6 @@ if ($Publish) {
     $files = @($setup, $portable, "latest.json") | ForEach-Object { Join-Path $dist $_ }
     git -C $root tag -a $tag -m "Clipback $version"
     git -C $root push origin $tag
-    $notesArgs = if ($Notes) { @("--notes", $Notes) } else { @("--generate-notes") }
+    $notesArgs = if ($NotesFile) { @("--notes-file", $NotesFile) } elseif ($Notes) { @("--notes", $Notes) } else { @("--generate-notes") }
     gh release create $tag @files --repo $Repo --title "Clipback $version" @notesArgs
 }

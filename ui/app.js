@@ -51,16 +51,17 @@ function hhmm(ms) {
 /// «Battlefield 6 2026-10-15 21-48-03» -> { game: "Battlefield 6", when: ms }
 function parseName(name) {
   // после даты могут идти приписки: « (2)», « (отрезок)», « (отрезок) (2)»
-  const m = /^(.*?) ?(\d{4})-(\d{2})-(\d{2}) (\d{2})-(\d{2})-(\d{2})((?: \([^)]*\))*)$/.exec(name);
+  const m = /^(.*?) ?(\d{4})-(\d{2})-(\d{2}) (\d{2})-(\d{2})-(\d{2})((?: \([^)]*\)| правка)*)$/.exec(name);
   if (!m) return { game: null, when: null, cut: /\(отрезок\)/.test(name) };
   const when = new Date(+m[2], +m[3] - 1, +m[4], +m[5], +m[6], +m[7]).getTime();
-  return { game: m[1] && m[1] !== "Clipback" ? m[1] : null, when, cut: /\(отрезок\)/.test(m[8]) };
+  const generic = ["Clipback", "Запись", "Скриншот", "Кадр"];
+  return { game: m[1] && !generic.includes(m[1]) ? m[1] : null, when, cut: /\(отрезок\)/.test(m[8]) };
 }
 
 function clipTitle(c) {
   const p = parseName(c.name);
   if (p.when === null) return c.name;
-  const base = p.game || (c.kind === "shot" ? "Скриншот" : "Повтор");
+  const base = p.game || (c.kind === "shot" ? "Скриншот" : /^Запись /.test(c.name) ? "Запись" : "Повтор");
   return p.cut ? `${base} — отрезок` : base;
 }
 
@@ -256,7 +257,61 @@ function main() {
   $("#btn-to-window").onclick = () => call("show_main_cmd");
 
   // ---------- список клипов ----------
-  const visible = () => S.clips.filter((c) => S.filter === "all" || c.kind === S.filter);
+  const gameOf = (c) => parseName(c.name).game;
+  const visible = () =>
+    S.clips.filter(
+      (c) => (S.filter === "all" || c.kind === S.filter) && (!S.game || gameOf(c) === S.game) && (!S.favOnly || c.favorite)
+    );
+
+  // список игр для фильтра — из названий клипов («Battlefield 6 2026-…»)
+  function renderGameFilter() {
+    const counts = new Map();
+    for (const c of S.clips) {
+      const g = gameOf(c);
+      if (g) counts.set(g, (counts.get(g) || 0) + 1);
+    }
+    if (S.game && !counts.has(S.game)) S.game = null;
+    const sel = $("#game-filter");
+    const games = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    sel.innerHTML = `<option value="">Все игры</option>`;
+    for (const [g, n] of games) {
+      const o = document.createElement("option");
+      o.value = g;
+      o.textContent = `${g} · ${n}`;
+      sel.append(o);
+    }
+    sel.value = S.game || "";
+    sel.disabled = !games.length;
+    $("#fav-filter").classList.toggle("active", !!S.favOnly);
+  }
+  $("#game-filter").addEventListener("change", (e) => {
+    S.game = e.target.value || null;
+    renderClipList();
+  });
+  $("#fav-filter").onclick = () => {
+    S.favOnly = !S.favOnly;
+    renderClipList();
+  };
+
+  async function toggleFavorite(c) {
+    if (!c) return;
+    const on = !c.favorite;
+    try {
+      await api.call("set_favorite", { path: c.path, on });
+      c.favorite = on;
+      if (S.clip && S.clip.path === c.path) S.clip.favorite = on;
+      renderClipList();
+      renderFav();
+    } catch (e) {
+      toast("Не получилось", String(e), "error");
+    }
+  }
+  function renderFav() {
+    const on = !!(S.clip && S.clip.favorite);
+    $("#btn-fav").classList.toggle("on", on);
+    $("#btn-fav").title = on ? "Убрать из избранного" : "В избранное — автоочистка не тронет";
+  }
+  $("#btn-fav").onclick = () => toggleFavorite(S.clip);
 
   async function loadClips(selectPath) {
     const list = await call("list_clips", {}, "Не удалось прочитать папку клипов");
@@ -298,6 +353,7 @@ function main() {
   );
 
   function renderClipList() {
+    renderGameFilter();
     const box = $("#clip-list");
     box.innerHTML = "";
     const list = visible();
@@ -323,7 +379,7 @@ function main() {
       el.dataset.path = c.path;
       const th = document.createElement("div");
       th.className = "thumb";
-      if (c.kind === "shot") th.insertAdjacentHTML("beforeend", `<span class="dur">PNG</span>`);
+      if (c.kind === "shot") th.insertAdjacentHTML("beforeend", `<span class="dur">${/\.png$/i.test(c.path) ? "PNG" : "JPG"}</span>`);
       else if (c.broken) th.insertAdjacentHTML("beforeend", `<span class="dur warn">ошибка</span>`);
       else th.insertAdjacentHTML("beforeend", `<span class="dur">${fmt(c.duration, 0)}</span>`);
       if (/\(отрезок\)/.test(c.name)) th.insertAdjacentHTML("beforeend", `<span class="badge" title="Отрезок">${svg("scissors")}</span>`);
@@ -334,9 +390,22 @@ function main() {
       const when = parseName(c.name).when ?? c.modified;
       info.children[1].textContent = `${hhmm(when)} · ${c.kind === "shot" ? `${c.width}×${c.height}` : mb(c.size)}`;
       el.title = c.name;
-      el.append(th, info);
+      const star = document.createElement("span");
+      star.className = "star" + (c.favorite ? " on" : "");
+      star.title = c.favorite ? "Убрать из избранного" : "В избранное";
+      star.innerHTML = `<svg viewBox="0 0 24 24"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/></svg>`;
+      star.onpointerdown = (e) => e.stopPropagation();
+      star.onclick = (e) => {
+        e.stopPropagation();
+        toggleFavorite(c);
+      };
+      el.append(th, info, star);
       // выбор по нажатию: если список перерисуется до отпускания кнопки, щелчок не потеряется
-      el.onpointerdown = (e) => { if (e.button === 0 && !(S.clip && S.clip.path === c.path)) selectClip(c); };
+      el.onpointerdown = (e) => {
+        if (e.button !== 0) return;
+        if (!(S.clip && S.clip.path === c.path)) selectClip(c);
+        dragOut.arm(e, c, el.querySelector(".thumb canvas, .thumb img"));
+      };
       el.onclick = () => { if (!(S.clip && S.clip.path === c.path)) selectClip(c); };
       box.append(el);
       thumbObserver.observe(el);
@@ -344,6 +413,39 @@ function main() {
     const act = box.querySelector(".clip.active");
     if (act) act.scrollIntoView({ block: "nearest" });
   }
+
+  // ---------- перетаскивание клипа в другие программы ----------
+  // Если зажать клип и повести мышью — начинается системное перетаскивание файла:
+  // его можно бросить в Discord, Telegram или папку.
+  const dragOut = {
+    pending: null,
+    arm(e, c, thumbEl) {
+      if (c.demo && MODE !== "browser") return;
+      this.pending = { x: e.clientX, y: e.clientY, c, thumbEl };
+    },
+    icon(el) {
+      if (!el) return null;
+      try {
+        const cv = document.createElement("canvas");
+        cv.width = 160;
+        cv.height = 90;
+        cv.getContext("2d").drawImage(el, 0, 0, cv.width, cv.height);
+        return cv.toDataURL("image/png").split(",")[1];
+      } catch {
+        return null; // картинка с другого источника — перетащим без миниатюры
+      }
+    },
+  };
+  addEventListener("pointermove", (e) => {
+    const p = dragOut.pending;
+    if (!p) return;
+    if (!(e.buttons & 1)) return (dragOut.pending = null);
+    if (Math.hypot(e.clientX - p.x, e.clientY - p.y) < 8) return;
+    dragOut.pending = null;
+    if (p.c.demo) return toast("Перетаскивание", "В программе клип можно бросить в Discord или папку", "copy");
+    api.call("start_drag", { path: p.c.path, iconPngBase64: dragOut.icon(p.thumbEl) }).catch((err) => toast("Не получилось перетащить", String(err), "error"));
+  });
+  addEventListener("pointerup", () => (dragOut.pending = null));
 
   function fillListThumb(el) {
     const c = S.clips.find((x) => x.path === el.dataset.path);
@@ -495,6 +597,7 @@ function main() {
 
     $("#clip-title").textContent = clipTitle(c);
     $("#clip-title").dataset.name = c.name;
+    renderFav();
     const when = parseName(c.name).when ?? c.modified;
     $("#clip-meta").textContent =
       c.kind === "shot"
@@ -576,6 +679,11 @@ function main() {
 
   $("#btn-play").onclick = () => setPlaying(!S.playing);
   $("#big-play").onclick = () => setPlaying(true);
+  // текущий клип тоже можно утащить прямо из плеера
+  image.draggable = false;
+  stage.addEventListener("pointerdown", (e) => {
+    if (e.button === 0 && S.clip && (e.target === image || e.target === video)) dragOut.arm(e, S.clip, e.target);
+  });
   stage.addEventListener("click", (e) => {
     if (e.target === video || e.target === vc) setPlaying(!S.playing);
   });
@@ -881,7 +989,16 @@ function main() {
     low: { maxH: 720, bpp: 0.045, name: "Низкое" },
   };
   S.exportQuality = localStorageGet("clipback.exportQuality") || "original";
-  if (S.exportQuality !== "original" && !QUALITY[S.exportQuality]) S.exportQuality = "original";
+  if (S.exportQuality !== "original" && S.exportQuality !== "discord" && !QUALITY[S.exportQuality]) S.exportQuality = "original";
+  // лимит «под размер» — как в ядре (media::Quality::for_size)
+  S.discordMb = +localStorageGet("clipback.discordMb") || 10;
+  function sizeFit(len, mbLimit, tracks) {
+    const video = (mbLimit * 8e6 * 0.92) / Math.max(len, 0.5) - 160000 * tracks;
+    if (video < 250000) return { ok: false, maxSecs: Math.floor((mbLimit * 8e6 * 0.92) / (250000 + 160000 * tracks)) };
+    const h = video >= 8e6 ? 1440 : video >= 4e6 ? 1080 : video >= 1.8e6 ? 720 : video >= 9e5 ? 540 : 480;
+    return { ok: true, h, video };
+  }
+  const exportTracks = (c) => Math.min(1, c.audioTracks || 0);
 
   function qualityOut(c, q) {
     const p = QUALITY[q];
@@ -897,7 +1014,23 @@ function main() {
     $$("#export-quality .seg-btn").forEach((b) => b.classList.toggle("active", b.dataset.q === S.exportQuality));
     const c = S.clip;
     const hint = $("#quality-hint");
-    if (S.exportQuality === "original" || !c) {
+    const discord = S.exportQuality === "discord";
+    $("#discord-sizes").hidden = !discord;
+    hint.classList.remove("warn");
+    if (discord) {
+      $$("#discord-sizes .chip").forEach((b) => b.classList.toggle("active", +b.dataset.mb === S.discordMb));
+      const own = $("#discord-own");
+      if (document.activeElement !== own) own.value = [10, 20, 50, 500].includes(S.discordMb) ? "" : S.discordMb;
+      own.placeholder = "своё";
+      if (!c) return (hint.textContent = "");
+      const f = sizeFit(S.outT - S.inT, S.discordMb, exportTracks(c));
+      if (!f.ok) {
+        hint.classList.add("warn");
+        hint.textContent = `Отрезок слишком длинный для ${S.discordMb} МБ: поместится до ${f.maxSecs} с. Сократите его или выберите лимит больше.`;
+      } else {
+        hint.textContent = `Уложится в ${S.discordMb} МБ: ${Math.min(f.h, c.height)}p, ≈ ${(f.video / 1e6).toFixed(1)} Мбит/с, одна дорожка звука — Discord играет только первую.`;
+      }
+    } else if (S.exportQuality === "original" || !c) {
       hint.textContent = "Без перекодирования: мгновенно и без потерь. Начало сдвигается к ближайшему ключевому кадру (до 1 с раньше).";
     } else {
       const o = qualityOut(c, S.exportQuality);
@@ -914,7 +1047,25 @@ function main() {
     })
   );
 
+  $$("#discord-sizes .chip").forEach((b) =>
+    b.addEventListener("click", () => setDiscordMb(+b.dataset.mb))
+  );
+  $("#discord-own").addEventListener("change", (e) => {
+    const v = Math.round(+e.target.value);
+    if (v >= 1 && v <= 10000) setDiscordMb(v);
+  });
+  function setDiscordMb(v) {
+    S.discordMb = v;
+    localStorageSet("clipback.discordMb", String(v));
+    renderQuality();
+    updateExport();
+  }
+
   function estimateSize(c, len) {
+    if (S.exportQuality === "discord") {
+      const f = sizeFit(len, S.discordMb, exportTracks(c));
+      return f.ok ? Math.min(S.discordMb * 1e6 * 0.92, (f.video / 8 + 20000 * exportTracks(c)) * len) : S.discordMb * 1e6;
+    }
     if (S.exportQuality === "original" || !QUALITY[S.exportQuality]) return c.duration > 0 ? (c.size / c.duration) * len : 0;
     const keep = audioKeep(c);
     const tracks = keep ? keep.length : c.audioTracks || 0;
@@ -928,7 +1079,9 @@ function main() {
     $("#est-len").textContent = fmt(len, 1);
     $("#est-size").textContent = c.duration > 0 ? mb(estimateSize(c, len)) : "—";
     const whole = S.inT <= 0.01 && S.outT >= c.duration - 0.01 && audioKeep(c) === null && S.exportQuality === "original";
-    $("#btn-export").disabled = S.busy || whole;
+    const tooLong = S.exportQuality === "discord" && !sizeFit(len, S.discordMb, exportTracks(c)).ok;
+    $("#btn-export").disabled = S.busy || whole || tooLong;
+    if (S.exportQuality === "discord") renderQuality(); // подсказка зависит от длины отрезка
     $("#btn-export").title = whole ? "Выделите на таймлайне нужный кусок, выключите дорожку или выберите качество" : "Ctrl+S";
   }
 
@@ -960,11 +1113,11 @@ function main() {
         end: S.outT,
         replace,
         audioKeep: audioKeep(c),
-        quality: S.exportQuality,
+        quality: S.exportQuality === "discord" ? `discord:${S.discordMb}` : S.exportQuality,
       });
       const shift = S.inT - r.start;
       const note = shift > 0.05 ? ` · начало на ${shift.toFixed(1)} с раньше (ключевой кадр)` : "";
-      const q = reencode ? ` · ${QUALITY[S.exportQuality].name.toLowerCase()} качество, ${mb(r.clip.size)}` : "";
+      const q = !reencode ? "" : S.exportQuality === "discord" ? ` · ${mb(r.clip.size)} из ${S.discordMb} МБ` : ` · ${QUALITY[S.exportQuality].name.toLowerCase()} качество, ${mb(r.clip.size)}`;
       toast(replace ? "Клип обрезан" : "Отрезок сохранён", `${fmt(r.end - r.start, 1)}${q}${note}`, "scissors");
       await loadClips(r.clip.path);
     } catch (e) {
@@ -990,7 +1143,8 @@ function main() {
         cv.width = video.videoWidth;
         cv.height = video.videoHeight;
         cv.getContext("2d").drawImage(video, 0, 0);
-        png = cv.toDataURL("image/png").split(",")[1];
+        const jpeg = S.state && S.state.settings.screenshotFormat !== "png";
+        png = cv.toDataURL(jpeg ? "image/jpeg" : "image/png", 0.92).split(",")[1];
       }
       const e = await api.call("save_frame", { pngBase64: png, label });
       toast("Кадр сохранён", `${fmt(S.t, 2)} · ${e.name}`, "camera");
@@ -1025,6 +1179,7 @@ function main() {
     }
     window.ImageEditor.open(src, {
       title: clipTitle(c),
+      jpeg: /\.jpe?g$/i.test(c.path),
       onSave: async (png, replace) => {
         try {
           const e = await api.call("save_edited_image", { path: c.path, pngBase64: png, replace });
@@ -1228,6 +1383,16 @@ function main() {
     $("#audio-error").textContent = aerr ? `Звук не пишется: ${aerr}` : "";
 
     $("#set-check-updates").checked = s.checkUpdates;
+    $("#set-save-sound").checked = s.saveSound;
+    $("#set-rec-indicator").checked = s.recordIndicator;
+    $("#set-rec-cursor").checked = s.recordCursor;
+    $("#set-auto-clean").checked = s.autoClean;
+    $("#set-clean-gb").value = String(s.cleanMaxGb);
+    $("#set-clean-days").value = String(s.cleanMaxDays);
+    $$(".clean-row").forEach((r) => r.classList.toggle("disabled", !s.autoClean));
+    $$("#set-shot-format .seg-btn").forEach((b) => b.classList.toggle("active", b.dataset.v === s.screenshotFormat));
+    $("#shot-format-hint").textContent =
+      s.screenshotFormat === "png" ? "Без потерь, но тяжелее: около 4–6 МБ на снимок 1440p" : "Легче в 5–10 раз (около 0,5–1 МБ), удобно отправлять";
     $("#about-kind").textContent = st.portable ? "portable-версия" : "установленная версия";
     renderUpdate();
     $$(".keybind").forEach((k) => { if (!k.classList.contains("listening")) k.textContent = s[k.dataset.key]; });
@@ -1257,6 +1422,67 @@ function main() {
   $("#set-autostart").addEventListener("change", (e) => saveSettings({ autostart: e.target.checked }));
   $("#set-close-to-tray").addEventListener("change", (e) => saveSettings({ closeToTray: e.target.checked }));
   $("#set-check-updates").addEventListener("change", (e) => saveSettings({ checkUpdates: e.target.checked }));
+  $("#set-save-sound").addEventListener("change", (e) => saveSettings({ saveSound: e.target.checked }));
+  $("#set-rec-indicator").addEventListener("change", (e) => saveSettings({ recordIndicator: e.target.checked }));
+  $("#set-rec-cursor").addEventListener("change", (e) => saveSettings({ recordCursor: e.target.checked }));
+
+  // автоочистка: перед включением или ужесточением лимита — показать, что уйдёт в корзину
+  async function setClean(patch, input) {
+    const s = { ...S.state.settings, ...patch };
+    if (s.autoClean && (s.cleanMaxGb || s.cleanMaxDays)) {
+      try {
+        const p = await api.call("clean_preview", { maxGb: s.cleanMaxGb, maxDays: s.cleanMaxDays });
+        if (p.count && !(await confirmBox("Включить автоочистку?", `Сейчас в корзину уйдут ${p.count} шт. (${mb(p.bytes)}) — самые старые клипы. Избранное останется.`, "Включить"))) {
+          fillSettings();
+          return;
+        }
+      } catch {}
+    }
+    saveSettings(patch);
+  }
+  $("#set-auto-clean").addEventListener("change", (e) => setClean({ autoClean: e.target.checked }));
+  $("#set-clean-gb").addEventListener("change", (e) => setClean({ cleanMaxGb: +e.target.value }));
+  $("#set-clean-days").addEventListener("change", (e) => setClean({ cleanMaxDays: +e.target.value }));
+  $$("#set-shot-format .seg-btn").forEach((b) => b.addEventListener("click", () => saveSettings({ screenshotFormat: b.dataset.v })));
+
+  // Небольшой разбор Markdown со страницы релиза: заголовки, списки, **жирный**, `код`.
+  // Сначала всё экранируется — HTML из текста не выполняется.
+  function notesHtml(md) {
+    const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const inline = (s) => esc(s).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/`([^`]+)`/g, "<code>$1</code>");
+    let html = "", depth = 0;
+    const setDepth = (d) => {
+      while (depth < d) (html += "<ul>"), depth++;
+      while (depth > d) (html += "</ul>"), depth--;
+    };
+    for (const raw of String(md || "").replace(/\r/g, "").split("\n")) {
+      const line = raw.replace(/\s+$/, "");
+      const li = line.match(/^(\s*)[-*] (.*)$/);
+      if (li) {
+        setDepth(Math.min(3, Math.floor(li[1].length / 2) + 1));
+        html += `<li>${inline(li[2])}</li>`;
+        continue;
+      }
+      if (!line.trim()) continue;
+      setDepth(0);
+      const h = line.match(/^#{1,4} (.*)$/) || line.match(/^\*\*([^*]+)\*\*:?$/);
+      html += h ? `<h4>${inline(h[1])}</h4>` : `<p>${inline(line.trim())}</p>`;
+    }
+    setDepth(0);
+    return html;
+  }
+  window.notesHtml = notesHtml;
+
+  function showWhatsNew(version, notes) {
+    $("#whatsnew-title").textContent = `Что нового в Clipback ${version}`;
+    $("#whatsnew-notes").innerHTML = notesHtml(notes);
+    $("#whatsnew").classList.add("open");
+  }
+  $("#whatsnew-ok").onclick = () => $("#whatsnew").classList.remove("open");
+  $("#whatsnew").addEventListener("pointerdown", (e) => e.target.id === "whatsnew" && $("#whatsnew").classList.remove("open"));
+  if (MODE === "window" || MODE === "browser") {
+    api.call("take_whats_new").then((w) => w && showWhatsNew(w.version, w.notes)).catch(() => {});
+  }
 
   // ---------- обновления ----------
   // upd.state: idle | checking | none | available | loading | error
@@ -1284,6 +1510,12 @@ function main() {
     $("#upd-install").hidden = !(upd.state === "available" || upd.state === "loading");
     $("#upd-install").disabled = upd.state === "loading";
     if (upd.state !== "loading") $("#upd-progress").hidden = true;
+    const relNotes = (upd.state === "available" || upd.state === "loading") && upd.info && upd.info.notes;
+    $("#upd-notes").hidden = !relNotes;
+    if (relNotes && $("#upd-notes").dataset.v !== upd.info.version) {
+      $("#upd-notes").innerHTML = notesHtml(upd.info.notes);
+      $("#upd-notes").dataset.v = upd.info.version;
+    }
   }
   async function checkUpdate() {
     upd.state = "checking";
@@ -1317,7 +1549,7 @@ function main() {
     upd.info = info;
     upd.state = "available";
     renderUpdate();
-    if (MODE === "window") toast(`Доступна версия ${info.version}`, "Обновить можно в настройках → Программа", "info");
+    if (MODE === "window") toast(`Доступна версия ${info.version}`, "Что нового и кнопка «Обновить» — в настройках → Программа", "info");
   });
   $("#nav-foot").addEventListener("click", () => { if (upd.state === "available") openSettings("app"); });
   $("#set-monitor").addEventListener("change", (e) => saveSettings({ monitor: +e.target.value }));

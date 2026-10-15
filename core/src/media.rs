@@ -153,16 +153,50 @@ pub struct Quality {
     pub max_height: u32,
     /// Бит на пиксель кадра — от него считается битрейт.
     pub bits_per_pixel: f64,
+    /// Точный битрейт видео (бит/с) — для сохранения под размер файла.
+    pub fixed_bitrate: Option<u32>,
 }
+
+/// Звук при сжатии под размер: кадры AAC копируются как есть.
+const AUDIO_BPS: f64 = crate::aac::BITRATE as f64;
+/// Ниже этого видео превращается в кашу — лучше честно сказать, что отрезок слишком длинный.
+const MIN_VIDEO_BPS: f64 = 250_000.0;
+/// Запас на контейнер MP4 и на то, что кодировщик чуть превышает битрейт.
+const SIZE_MARGIN: f64 = 0.92;
 
 impl Quality {
     pub fn preset(name: &str) -> Option<Quality> {
         match name {
-            "high" => Some(Quality { max_height: 1440, bits_per_pixel: 0.06 }),
-            "medium" => Some(Quality { max_height: 1080, bits_per_pixel: 0.05 }),
-            "low" => Some(Quality { max_height: 720, bits_per_pixel: 0.045 }),
+            "high" => Some(Quality { max_height: 1440, bits_per_pixel: 0.06, fixed_bitrate: None }),
+            "medium" => Some(Quality { max_height: 1080, bits_per_pixel: 0.05, fixed_bitrate: None }),
+            "low" => Some(Quality { max_height: 720, bits_per_pixel: 0.045, fixed_bitrate: None }),
             _ => None,
         }
+    }
+
+    /// Качество, при котором отрезок длиной `secs` с `audio_tracks` дорожками звука уложится в `bytes`.
+    /// `squeeze` < 1 — ужать сильнее (повторная попытка, если файл всё же вышел больше).
+    pub fn for_size(bytes: u64, secs: f64, audio_tracks: usize, squeeze: f64) -> Result<Quality> {
+        let secs = secs.max(0.5);
+        let budget = bytes as f64 * 8.0 * SIZE_MARGIN * squeeze;
+        let video = budget / secs - AUDIO_BPS * audio_tracks as f64;
+        if video < MIN_VIDEO_BPS {
+            let max_secs = (bytes as f64 * 8.0 * SIZE_MARGIN) / (MIN_VIDEO_BPS + AUDIO_BPS * audio_tracks as f64);
+            bail!(
+                "в {} МБ поместится не больше {} с хорошего видео — сократите отрезок или выберите лимит больше",
+                bytes / 1_000_000,
+                max_secs.floor() as u64
+            );
+        }
+        // разрешение — по битрейту: на маленьком битрейте 1440p выглядит хуже, чем честные 720p
+        let max_height = match video {
+            v if v >= 8_000_000.0 => 1440,
+            v if v >= 4_000_000.0 => 1080,
+            v if v >= 1_800_000.0 => 720,
+            v if v >= 900_000.0 => 540,
+            _ => 480,
+        };
+        Ok(Quality { max_height, bits_per_pixel: 0.0, fixed_bitrate: Some(video.min(80_000_000.0) as u32) })
     }
 
     /// Размер картинки на выходе (чётный).
@@ -173,6 +207,9 @@ impl Quality {
 
     /// Битрейт видео, бит/с.
     pub fn bitrate(&self, w: u32, h: u32, fps: f64) -> u32 {
+        if let Some(b) = self.fixed_bitrate {
+            return b;
+        }
         ((w as f64 * h as f64 * fps.max(1.0) * self.bits_per_pixel) as u32).clamp(500_000, 80_000_000)
     }
 }
@@ -320,4 +357,31 @@ pub fn transcode(
 /// Звук из AAC-пакетов файла — для перекодирования (данные не меняются).
 pub(crate) fn packet(data: Vec<u8>, pos: i64) -> Arc<AudioPacket> {
     Arc::new(AudioPacket { data, pos })
+}
+
+#[cfg(test)]
+mod size_tests {
+    use super::Quality;
+
+    #[test]
+    fn fits_size_and_picks_resolution_by_bitrate() {
+        // 30 с в 20 МБ: видео ≈ 4,7 Мбит/с — 1080p
+        let q = Quality::for_size(20_000_000, 30.0, 1, 1.0).unwrap();
+        assert_eq!(q.max_height, 1080);
+        let total = (q.bitrate(1920, 1080, 60.0) as f64 + 160_000.0) * 30.0 / 8.0;
+        assert!(total <= 20_000_000.0 * 0.93, "{total}");
+        // минута в 10 МБ — 540p, две минуты — 480p
+        assert_eq!(Quality::for_size(10_000_000, 60.0, 1, 1.0).unwrap().max_height, 540);
+        assert_eq!(Quality::for_size(10_000_000, 120.0, 1, 1.0).unwrap().max_height, 480);
+        // повторная попытка ужимает битрейт
+        let a = Quality::for_size(10_000_000, 60.0, 1, 1.0).unwrap().fixed_bitrate.unwrap();
+        let b = Quality::for_size(10_000_000, 60.0, 1, 0.8).unwrap().fixed_bitrate.unwrap();
+        assert!(b < a);
+    }
+
+    #[test]
+    fn too_long_for_limit_is_an_error_with_hint() {
+        let e = Quality::for_size(10_000_000, 600.0, 1, 1.0).unwrap_err().to_string();
+        assert!(e.contains("10 МБ") && e.contains("с хорошего видео"), "{e}");
+    }
 }

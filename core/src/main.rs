@@ -162,7 +162,8 @@ fn real_main() -> Result<()> {
                 }
             }
             Event::Error { message } => bail!("{message}"),
-            Event::Started { .. } => {}
+            // полноценную запись CLI не запускает
+            Event::Started { .. } | Event::RecordStarted { .. } | Event::Recorded { .. } | Event::RecordFailed { .. } => {}
         }
     }
     Ok(())

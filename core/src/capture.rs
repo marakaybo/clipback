@@ -6,8 +6,9 @@ use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D, D3D11_TEXTURE2D_DESC};
 use windows::Win32::Graphics::Dxgi::{
     IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT,
-    DXGI_OUTDUPL_FRAME_INFO,
+    DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_POINTER_SHAPE_INFO,
 };
+use crate::cursor::{Pointer, PointerShape};
 
 pub enum Frame {
     /// Новый кадр. Текстуру нужно скопировать и затем вызвать `release`.
@@ -23,11 +24,15 @@ pub struct Duplicator {
     output: IDXGIOutput1,
     dup: Option<IDXGIOutputDuplication>,
     holding: bool,
+    /// Курсор мыши: положение и форма приходят вместе с кадрами.
+    pub pointer: Pointer,
+    /// Курсор сдвинулся или сменил форму с прошлого раза.
+    pub pointer_changed: bool,
 }
 
 impl Duplicator {
     pub fn new(device: &ID3D11Device, output: &IDXGIOutput1) -> Result<Self> {
-        let mut d = Self { device: device.clone(), output: output.clone(), dup: None, holding: false };
+        let mut d = Self { device: device.clone(), output: output.clone(), dup: None, holding: false, pointer: Pointer::default(), pointer_changed: false };
         d.recreate().context("не удалось начать захват экрана")?;
         Ok(d)
     }
@@ -62,6 +67,8 @@ impl Duplicator {
         match unsafe { dup.AcquireNextFrame(timeout_ms, &mut info, &mut resource) } {
             Ok(()) => {
                 self.holding = true;
+                let dup = dup.clone();
+                self.read_pointer(&dup, &info);
                 // кадр, где сдвинулась только мышь, тоже годится: содержимое то же
                 let tex: ID3D11Texture2D = resource.context("пустой кадр")?.cast()?;
                 Ok(Frame::New(tex))
@@ -76,6 +83,37 @@ impl Duplicator {
                 crate::util::log(format!("захват: {e}"));
                 let _ = self.recreate();
                 Ok(Frame::Lost)
+            }
+        }
+    }
+
+    fn read_pointer(&mut self, dup: &IDXGIOutputDuplication, info: &DXGI_OUTDUPL_FRAME_INFO) {
+        if info.LastMouseUpdateTime != 0 {
+            let p = &info.PointerPosition;
+            self.pointer.visible = p.Visible.as_bool();
+            if self.pointer.visible {
+                self.pointer.x = p.Position.x;
+                self.pointer.y = p.Position.y;
+            }
+            self.pointer_changed = true;
+        }
+        if info.PointerShapeBufferSize > 0 {
+            let mut buf = vec![0u8; info.PointerShapeBufferSize as usize];
+            let mut need = 0u32;
+            let mut si = DXGI_OUTDUPL_POINTER_SHAPE_INFO::default();
+            let ok = unsafe { dup.GetFramePointerShape(buf.len() as u32, buf.as_mut_ptr() as _, &mut need, &mut si) };
+            if ok.is_ok() {
+                self.pointer.shape = Some(PointerShape {
+                    kind: si.Type,
+                    width: si.Width,
+                    height: si.Height,
+                    pitch: si.Pitch,
+                    hot_x: si.HotSpot.x,
+                    hot_y: si.HotSpot.y,
+                    data: buf,
+                });
+                self.pointer.shape_version += 1;
+                self.pointer_changed = true;
             }
         }
     }

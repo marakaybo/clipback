@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use windows::Win32::Graphics::Direct3D11::{ID3D11Texture2D, ID3D11VideoProcessorOutputView};
+use windows::Win32::Graphics::Direct3D11::{ID3D11RenderTargetView, ID3D11Texture2D, ID3D11VideoProcessorOutputView};
 use windows::Win32::Media::MediaFoundation::{MFShutdown, MFStartup, MFSTARTUP_FULL, MF_VERSION};
 use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
@@ -31,6 +31,8 @@ pub struct Config {
     /// Уменьшить картинку, если она выше этого значения (например, 1080).
     pub max_height: Option<u32>,
     pub audio: AudioConfig,
+    /// Рисовать курсор мыши в записи.
+    pub cursor: bool,
 }
 
 impl Default for Config {
@@ -43,6 +45,7 @@ impl Default for Config {
             out_dir: crate::util::videos_dir().join("Clipback"),
             max_height: None,
             audio: AudioConfig::default(),
+            cursor: true,
         }
     }
 }
@@ -53,7 +56,7 @@ pub enum Command {
     Save { seconds: Option<u32>, label: Option<String> },
     SetBufferLength(u32),
     /// PNG текущего кадра экрана.
-    Screenshot { reply: Sender<Result<Vec<u8>, String>> },
+    Screenshot { reply: Sender<Result<crate::shot::RawImage, String>> },
     /// Начать полноценную запись в файл (с последнего ключевого кадра буфера).
     StartRecord { label: Option<String> },
     StopRecord,
@@ -123,18 +126,30 @@ impl Drop for Recorder {
 
 /// Всё, что зависит от размера захватываемой картинки.
 struct Pipeline {
+    /// Чистая копия экрана (из неё же — скриншоты).
     frame: ID3D11Texture2D,
+    /// Копия экрана с курсором — её и кодируем, если курсор включён.
+    composed: Option<(ID3D11Texture2D, ID3D11RenderTargetView)>,
     conv: Converter,
     pool: Vec<(ID3D11Texture2D, ID3D11VideoProcessorOutputView)>,
 }
 
 const POOL: usize = 8;
 
-fn build_pipeline(g: &Gpu, in_w: u32, in_h: u32, out_w: u32, out_h: u32, fps: u32) -> Result<Pipeline> {
+fn build_pipeline(g: &Gpu, in_w: u32, in_h: u32, out_w: u32, out_h: u32, fps: u32, cursor: bool) -> Result<Pipeline> {
     let frame = create_frame_texture(&g.device, in_w, in_h)?;
-    let conv = Converter::new(&g.device, &g.context, &frame, out_w, out_h, fps)?;
+    let composed = if cursor {
+        let t = create_frame_texture(&g.device, in_w, in_h)?;
+        let mut rtv = None;
+        unsafe { g.device.CreateRenderTargetView(&t, None, Some(&mut rtv))? };
+        Some((t, rtv.context("вид кадра для курсора")?))
+    } else {
+        None
+    };
+    let src = composed.as_ref().map(|(t, _)| t).unwrap_or(&frame);
+    let conv = Converter::new(&g.device, &g.context, src, out_w, out_h, fps)?;
     let pool = (0..POOL).map(|_| conv.make_target(&g.device)).collect::<Result<_>>()?;
-    Ok(Pipeline { frame, conv, pool })
+    Ok(Pipeline { frame, composed, conv, pool })
 }
 
 fn output_size(w: u32, h: u32, max_h: Option<u32>) -> (u32, u32) {
@@ -168,7 +183,21 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
     let (out_w, out_h) = output_size(in_w, in_h, cfg.max_height);
     let fps = cfg.fps.clamp(10, 240);
 
-    let mut pipe = build_pipeline(&g, in_w, in_h, out_w, out_h, fps)?;
+    // курсор рисуется на видеокарте; если шейдер не собрался — пишем без курсора
+    let mut painter = if cfg.cursor {
+        match crate::cursor::CursorPainter::new(&g.device) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                crate::util::log(format!("курсор не будет записываться: {e:#}"));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let mut pipe = build_pipeline(&g, in_w, in_h, out_w, out_h, fps, painter.is_some())?;
+    // кадр экрана обновился — копию с курсором нужно собрать заново
+    let mut frame_dirty = true;
     let mut enc = Encoder::new(
         &g.device,
         &EncoderSettings { width: out_w, height: out_h, fps, bitrate: cfg.bitrate_mbps.clamp(1, 200) * 1_000_000 },
@@ -254,7 +283,7 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
                 Command::SetBufferLength(s) => ring.set_length(s),
                 Command::Screenshot { reply } => {
                     let r = if have_frame {
-                        crate::shot::grab_png(&g, &pipe.frame).map_err(|e| format!("{e:#}"))
+                        crate::shot::grab(&g, &pipe.frame).map_err(|e| format!("{e:#}"))
                     } else {
                         Err("экран ещё не захвачен".into())
                     };
@@ -324,7 +353,8 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
                     if (d.Width, d.Height) != (fd.Width, fd.Height) {
                         // разрешение экрана изменилось — картинка масштабируется в прежний размер видео
                         dup.release();
-                        pipe = build_pipeline(&g, d.Width, d.Height, out_w, out_h, fps)?;
+                        pipe = build_pipeline(&g, d.Width, d.Height, out_w, out_h, fps, painter.is_some())?;
+                        frame_dirty = true;
                         continue;
                     }
                     let left = due.saturating_duration_since(Instant::now());
@@ -333,6 +363,7 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
                             unsafe { g.context.CopyResource(&pipe.frame, &tex) };
                             copied = true;
                             have_frame = true;
+                            frame_dirty = true;
                             dbg.copies += 1;
                         }
                         dup.release();
@@ -354,6 +385,7 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
             unsafe { g.context.CopyResource(&pipe.frame, &tex) };
             dup.release();
             have_frame = true;
+            frame_dirty = true;
             dbg.copies += 1;
         }
         copied = false;
@@ -372,6 +404,18 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
             }
         }
         if have_frame && enc.wants_input() {
+            // курсор: чистый кадр + курсор поверх, только если что-то поменялось
+            if let (Some(painter), Some((ct, rtv))) = (painter.as_mut(), pipe.composed.as_ref()) {
+                if frame_dirty || dup.pointer_changed {
+                    unsafe { g.context.CopyResource(ct, &pipe.frame) };
+                    let d = texture_desc(ct);
+                    if let Err(e) = painter.draw(&g.device, &g.context, rtv, d.Width, d.Height, &dup.pointer) {
+                        crate::util::log(format!("курсор: {e:#}"));
+                    }
+                    frame_dirty = false;
+                    dup.pointer_changed = false;
+                }
+            }
             let (tex, view) = &pipe.pool[pool_i];
             pipe.conv.convert(view)?;
             enc.push(tex, idx)?;

@@ -109,6 +109,8 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
         .await
         .map_err(|e| format!("не удалось скачать обновление: {e}"))?;
 
+    // «что нового» покажем один раз после перезапуска уже в новой версии
+    remember_notes(&app, &update.version, update.body.as_deref().unwrap_or(""));
     // запись надо остановить до замены файлов
     crate::stop_for_exit(&app);
     if is_portable() {
@@ -145,6 +147,39 @@ fn replace_self(bytes: &[u8]) -> std::io::Result<()> {
         return Err(e);
     }
     Ok(())
+}
+
+fn notes_file(app: &AppHandle) -> Option<PathBuf> {
+    app.path().app_config_dir().ok().map(|d| d.join("whats-new.json"))
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct WhatsNew {
+    pub version: String,
+    pub notes: String,
+}
+
+fn remember_notes(app: &AppHandle, version: &str, notes: &str) {
+    if notes.trim().is_empty() {
+        return;
+    }
+    if let Some(p) = notes_file(app) {
+        let w = WhatsNew { version: version.into(), notes: notes.into() };
+        let _ = std::fs::write(p, serde_json::to_vec(&w).unwrap_or_default());
+    }
+}
+
+/// «Что нового» после обновления: отдаётся один раз и только той версии, о которой запомнили.
+#[tauri::command]
+pub fn take_whats_new(app: AppHandle) -> Option<WhatsNew> {
+    let p = notes_file(&app)?;
+    let w: WhatsNew = serde_json::from_slice(&std::fs::read(&p).ok()?).ok()?;
+    if w.version != env!("CARGO_PKG_VERSION") {
+        // запомнили для другой версии (обновление не встало) — подождём
+        return None;
+    }
+    let _ = std::fs::remove_file(&p);
+    Some(w)
 }
 
 /// Тихая проверка при запуске: если есть новая версия — сказать интерфейсу.
