@@ -99,7 +99,7 @@
         <section class="player panel">
           <div class="player-head">
             <div class="head-text">
-              <div class="clip-title" id="clip-title" spellcheck="false"></div>
+              <div class="clip-title" id="clip-title" spellcheck="false" title="Переименовать — щелчок или F2"></div>
               <div class="clip-meta" id="clip-meta"></div>
             </div>
             <div class="player-head-actions">
@@ -310,6 +310,7 @@
     <div class="confirm panel">
       <h3 id="confirm-title"></h3>
       <p id="confirm-text"></p>
+      <label class="confirm-check" id="confirm-check-row" hidden><input type="checkbox" id="confirm-check"><span id="confirm-check-text"></span></label>
       <div class="confirm-actions">
         <button class="btn btn-ghost" id="confirm-no">Отмена</button>
         <button class="btn btn-danger" id="confirm-yes">Да</button>
@@ -450,6 +451,7 @@
             <dt>Звук вкл / выкл</dt><dd>M</dd>
             <dt>Во весь экран</dt><dd>F</dd>
             <dt>В корзину</dt><dd>Delete</dd>
+            <dt>Переименовать</dt><dd>F2</dd>
             <dt>Закрыть оверлей</dt><dd>Esc</dd>
           </dl>
         </section>
@@ -516,6 +518,10 @@
           <div class="opt">
             <div><b>Звук при сохранении</b><small>Тихий щелчок, когда сохранён повтор или скриншот, и при начале и конце записи</small></div>
             <label class="switch"><input type="checkbox" id="set-save-sound"><span></span></label>
+          </div>
+          <div class="opt">
+            <div><b>Спрашивать перед удалением</b><small>Клип уходит в корзину Windows, оттуда его можно вернуть</small></div>
+            <label class="switch"><input type="checkbox" id="set-confirm-delete"><span></span></label>
           </div>
           <div class="opt">
             <div><b>Крестик сворачивает в трей</b><small>Запись продолжится в фоне</small></div>

@@ -68,7 +68,7 @@
     hotkeyOverlay: "Alt+Z", hotkeySave: "Alt+F10", hotkeyScreenshot: "Alt+F1", hotkeyRecord: "Alt+F9",
     systemAudio: true, mic: true, micDevice: null, micGain: 1, audioMode: "advanced", customBitrate: 12,
     appTracks: [{ name: "Discord", exe: "Discord.exe", enabled: true }],
-    recordOnStart: true, closeToTray: true, autostart: false, checkUpdates: true, screenshotFormat: "jpg", saveSound: true, recordIndicator: true, recordCursor: true, micAgc: true, autoClean: false, cleanMaxGb: 50, cleanMaxDays: 0,
+    recordOnStart: true, closeToTray: true, autostart: false, checkUpdates: true, screenshotFormat: "jpg", saveSound: true, recordIndicator: true, recordCursor: true, micAgc: true, confirmDelete: true, autoClean: false, cleanMaxGb: 50, cleanMaxDays: 0,
   };
   const state = {
     recording: true, starting: false,

@@ -146,15 +146,21 @@ function main() {
   // ---------- подтверждение ----------
   let confirmResolve = null;
   window.confirmBox = confirmBox;
-  function confirmBox(title, text, yes = "Да") {
+  // check — подпись галочки («Больше не спрашивать»); её состояние — в confirmBox.checked
+  function confirmBox(title, text, yes = "Да", check = "") {
     $("#confirm-title").textContent = title;
     $("#confirm-text").textContent = text;
+    $("#confirm-check-row").hidden = !check;
+    $("#confirm-check-text").textContent = check;
+    $("#confirm-check").checked = false;
+    confirmBox.checked = false;
     $("#confirm-yes").textContent = yes;
     $("#confirm").classList.add("open");
     setTimeout(() => $("#confirm-yes").focus(), 0);
     return new Promise((r) => (confirmResolve = r));
   }
   function closeConfirm(v) {
+    confirmBox.checked = $("#confirm-check").checked;
     $("#confirm").classList.remove("open");
     if (confirmResolve) confirmResolve(v);
     confirmResolve = null;
@@ -406,7 +412,16 @@ function main() {
         e.stopPropagation();
         toggleFavorite(c);
       };
-      el.append(th, info, star);
+      const bin = document.createElement("span");
+      bin.className = "trash";
+      bin.title = "В корзину";
+      bin.innerHTML = `<svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>`;
+      bin.onpointerdown = (e) => e.stopPropagation();
+      bin.onclick = (e) => {
+        e.stopPropagation();
+        deleteClip(c);
+      };
+      el.append(th, info, star, bin);
       // выбор по нажатию: если список перерисуется до отпускания кнопки, щелчок не потеряется
       el.onpointerdown = (e) => {
         if (e.button !== 0) return;
@@ -1271,25 +1286,33 @@ function main() {
   };
   $("#btn-reveal").onclick = () => S.clip && call("reveal_clip", { path: S.clip.path }, "Не удалось открыть папку");
 
-  async function deleteClip() {
-    const c = S.clip;
+  // в корзину: по умолчанию спрашиваем, галочка «Больше не спрашивать» выключает вопрос
+  // (вернуть его можно в настройках → Программа)
+  async function deleteClip(c = S.clip) {
     if (!c || S.busy) return;
+    const s = S.state && S.state.settings;
+    if (s && s.confirmDelete) {
+      const ok = await confirmBox("Отправить в корзину?", `«${clipTitle(c)}» — его можно будет вернуть из корзины Windows.`, "В корзину", "Больше не спрашивать");
+      if (!ok) return;
+      if (confirmBox.checked) saveSettings({ confirmDelete: false });
+    }
+    const current = S.clip && S.clip.path === c.path;
     const list = visible();
     const idx = list.findIndex((x) => x.path === c.path);
     const next = list[idx + 1] || list[idx - 1] || null;
-    releaseMedia();
+    if (current) releaseMedia();
     thumbs.forget(c.path);
     try {
       await api.call("delete_clip", { path: c.path });
       toast("В корзине", `${clipTitle(c)} — можно восстановить из корзины Windows`, "trash");
-      S.clip = null;
-      await loadClips(next && next.path);
+      if (current) S.clip = null;
+      await loadClips(current ? next && next.path : S.clip && S.clip.path);
     } catch (e) {
       toast("Не удалось удалить", String(e), "error");
-      selectClip(c);
+      if (current) selectClip(c);
     }
   }
-  $("#btn-delete").onclick = deleteClip;
+  $("#btn-delete").onclick = () => deleteClip();
 
   // переименование: щелчок по названию
   const title = $("#clip-title");
@@ -1450,6 +1473,7 @@ function main() {
     $("#set-save-sound").checked = s.saveSound;
     $("#set-rec-indicator").checked = s.recordIndicator;
     $("#set-mic-agc").checked = s.micAgc;
+    $("#set-confirm-delete").checked = s.confirmDelete;
     $("#set-rec-cursor").checked = s.recordCursor;
     $("#set-auto-clean").checked = s.autoClean;
     $("#set-clean-gb").value = String(s.cleanMaxGb);
@@ -1490,6 +1514,7 @@ function main() {
   $("#set-save-sound").addEventListener("change", (e) => saveSettings({ saveSound: e.target.checked }));
   $("#set-rec-indicator").addEventListener("change", (e) => saveSettings({ recordIndicator: e.target.checked }));
   $("#set-mic-agc").addEventListener("change", (e) => saveSettings({ micAgc: e.target.checked }));
+  $("#set-confirm-delete").addEventListener("change", (e) => saveSettings({ confirmDelete: e.target.checked }));
   $("#set-rec-cursor").addEventListener("change", (e) => saveSettings({ recordCursor: e.target.checked }));
 
   // автоочистка: перед включением или ужесточением лимита — показать, что уйдёт в корзину
@@ -1847,6 +1872,7 @@ function main() {
       case "KeyM": video.muted = !video.muted; renderVolume(); break;
       case "KeyF": setFullView(!isFullView()); break;
       case "KeyE": editShot(); break;
+      case "F2": e.preventDefault(); title.click(); break;
       case "Delete": deleteClip(); break;
       case "KeyS":
         if (e.ctrlKey) { e.preventDefault(); exportClip(); }

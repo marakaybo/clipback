@@ -64,6 +64,8 @@ pub struct Settings {
     pub record_indicator: bool,
     /// Курсор мыши в записи.
     pub record_cursor: bool,
+    /// Спрашивать перед отправкой клипа в корзину.
+    pub confirm_delete: bool,
     /// Автоочистка папки клипов (по умолчанию выключена).
     pub auto_clean: bool,
     /// Держать папку не больше стольких ГБ (0 — без лимита).
@@ -101,6 +103,7 @@ impl Default for Settings {
             save_sound: true,
             record_indicator: true,
             record_cursor: true,
+            confirm_delete: true,
             auto_clean: false,
             clean_max_gb: 50,
             clean_max_days: 0,
