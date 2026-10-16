@@ -117,6 +117,8 @@ function main() {
     picked: new Set(),
     // включённые звуковые дорожки для сохранения отрезка: { номер: да/нет }
     trackOn: {},
+    // громкость дорожек в сохранённом отрезке, %: { номер: 0…200 } (нет — 100)
+    trackVol: {},
     mics: null,
     apps: null,
     exportQuality: "original",
@@ -243,6 +245,36 @@ function main() {
       action.hidden = false;
       action.textContent = "Повторить";
       action.onclick = () => call("set_recording", { on: true });
+    } else if (st.captureBlocked) {
+      // игра на весь экран выводится мимо рабочего стола — Windows не отдаёт её кадры
+      const b = st.captureBlocked;
+      banner.hidden = false;
+      const lead = `${b.game} не попадает в запись: видеодрайвер выводит игру прямо на монитор, мимо Windows. `;
+      action.hidden = true;
+      if (b.nvidia && b.driverOk) {
+        $("#banner-text").textContent = lead + "Настройка NVIDIA для неё уже включена — перезапустите игру, и запись заработает.";
+      } else if (b.nvidia && b.exe) {
+        $("#banner-text").textContent =
+          lead + `Clipback может включить для ${b.exe} настройку NVIDIA «Использовать цепочку буферов DXGI» — только для этой программы, другие игры не изменятся. Windows спросит права администратора.`;
+        action.hidden = false;
+        action.textContent = "Исправить";
+        action.onclick = async () => {
+          action.disabled = true;
+          try {
+            await call("fix_capture_blocked");
+            toast("Готово", "Перезапустите игру — запись заработает", "check");
+          } catch (e) {
+            toast("Не удалось изменить настройку", String(e), "error");
+          } finally {
+            action.disabled = false;
+          }
+        };
+      } else if (b.nvidia) {
+        $("#banner-text").textContent =
+          lead + "Панель управления NVIDIA → Управление параметрами 3D → «Метод представления Vulkan/OpenGL» → «Использовать цепочку буферов DXGI», затем перезапустите игру.";
+      } else {
+        $("#banner-text").textContent = lead + "Включите в игре оконный режим без рамки вместо полноэкранного и перезапустите игру.";
+      }
     } else if (st.diskFree != null && st.diskFree < 2e9) {
       // мало места — повтор может не сохраниться
       banner.hidden = false;
@@ -771,7 +803,10 @@ function main() {
       return;
     }
 
-    if (!same) S.trackOn = {};
+    if (!same) {
+      S.trackOn = {};
+      S.trackVol = {};
+    }
     renderQuality();
     // по умолчанию — последние 30 секунд: в повторе нужный момент обычно в конце
     if (!same || !fromReload) {
@@ -1085,6 +1120,16 @@ function main() {
   }
 
   const isOn = (i) => S.trackOn[i] !== false;
+  const volOf = (i) => S.trackVol[i] ?? 100;
+
+  /// Громкость каждой дорожки файла (1 — как есть). null — нигде не менялась.
+  /// «Всё вместе» ядро сведёт заново из системы и микрофона с их громкостью.
+  function audioGains(c) {
+    const names = trackNames(c);
+    const vis = visibleTracks(c).map((t) => t.index);
+    if (!names.length || vis.every((i) => volOf(i) === 100)) return null;
+    return names.map((_, i) => (vis.includes(i) ? volOf(i) : 100) / 100);
+  }
 
   /// Какие дорожки оставить в отрезке (номера в файле). null — все.
   function audioKeep(c) {
@@ -1133,10 +1178,50 @@ function main() {
       });
       name.addEventListener("pointerdown", (e) => e.stopPropagation());
       row.append(name);
+
+      // громкость дорожки в отрезке: 0–200 %, двойной щелчок — 100 %
+      const vol = document.createElement("label");
+      vol.className = "tvol";
+      vol.title = "Громкость дорожки в сохранённом отрезке: ползунок или колесо мыши. Двойной щелчок — 100 %";
+      vol.innerHTML = `<input type="range" min="0" max="200" step="5"><span class="mono"></span>`;
+      const range = vol.querySelector("input");
+      const val = vol.querySelector("span");
+      const show = () => {
+        val.textContent = `${volOf(t.index)} %`;
+        vol.classList.toggle("changed", volOf(t.index) !== 100);
+      };
+      range.value = volOf(t.index);
+      show();
+      const set = (v) => {
+        S.trackVol[t.index] = v;
+        range.value = v;
+        show();
+        repaintTrack(row);
+        updateExport();
+      };
+      range.addEventListener("input", () => set(+range.value));
+      vol.addEventListener("dblclick", () => set(100));
+      vol.addEventListener("wheel", (e) => {
+        e.preventDefault();
+        set(clamp(volOf(t.index) + (e.deltaY < 0 ? 5 : -5), 0, 200));
+      }, { passive: false });
+      vol.addEventListener("pointerdown", (e) => e.stopPropagation());
+      row.append(vol);
       box.append(row);
     }
-    $("#tracks-hint").hidden = vis.length < 2;
+    $("#tracks-hint").hidden = vis.length < 1;
     drawPeaks(c);
+  }
+
+  // пики дорожек текущего клипа — чтобы перерисовать волну при смене громкости
+  let shownPeaks = null;
+  function repaintTrack(row) {
+    const p = shownPeaks && shownPeaks[+row.dataset.index];
+    if (!p) return;
+    const g = volOf(+row.dataset.index) / 100;
+    const [base, hi] = row.querySelectorAll("canvas");
+    paintWave(base, p, "#6d717a", g);
+    paintWave(hi, p, "#4da8ff", g);
   }
 
   async function drawPeaks(c) {
@@ -1148,13 +1233,8 @@ function main() {
       return;
     }
     if (token !== peaksToken || S.clip !== c) return;
-    for (const row of $$("#tracks .track")) {
-      const p = peaks[+row.dataset.index];
-      if (!p) continue;
-      const [base, hi] = row.querySelectorAll("canvas");
-      paintWave(base, p, "#6d717a");
-      paintWave(hi, p, "#4da8ff");
-    }
+    shownPeaks = peaks;
+    for (const row of $$("#tracks .track")) repaintTrack(row);
   }
 
   function demoPeaks(c) {
@@ -1169,14 +1249,14 @@ function main() {
     });
   }
 
-  function paintWave(cv, peaks, color) {
+  function paintWave(cv, peaks, color, gain = 1) {
     const ctx = cv.getContext("2d");
     const { width: w, height: h } = cv;
     ctx.clearRect(0, 0, w, h);
     ctx.fillStyle = color;
     const bar = 2 * devicePixelRatio;
     for (let x = 0; x < w; x += bar + devicePixelRatio) {
-      const v = peaks[Math.min(peaks.length - 1, Math.floor((x / w) * peaks.length))] || 0;
+      const v = Math.min(1, (peaks[Math.min(peaks.length - 1, Math.floor((x / w) * peaks.length))] || 0) * gain);
       // громкость в дБ: тихое тоже видно
       const db = v > 0 ? 20 * Math.log10(v) : -90;
       const a = clamp((db + 54) / 54, 0, 1);
@@ -1289,11 +1369,11 @@ function main() {
     const len = S.outT - S.inT;
     $("#est-len").textContent = fmt(len, 1);
     $("#est-size").textContent = c.duration > 0 ? mb(estimateSize(c, len)) : "—";
-    const whole = S.inT <= 0.01 && S.outT >= c.duration - 0.01 && audioKeep(c) === null && S.exportQuality === "original";
+    const whole = S.inT <= 0.01 && S.outT >= c.duration - 0.01 && audioKeep(c) === null && audioGains(c) === null && S.exportQuality === "original";
     const tooLong = S.exportQuality === "discord" && !sizeFit(len, S.discordMb, exportTracks(c)).ok;
     $("#btn-export").disabled = S.busy || whole || tooLong;
     if (S.exportQuality === "discord") renderQuality(); // подсказка зависит от длины отрезка
-    $("#btn-export").title = whole ? "Выделите на таймлайне нужный кусок, выключите дорожку или выберите качество" : "Ctrl+S";
+    $("#btn-export").title = whole ? "Выделите на таймлайне нужный кусок, выключите дорожку, измените её громкость или выберите качество" : "Ctrl+S";
   }
 
   function showProgress(f) {
@@ -1324,6 +1404,7 @@ function main() {
         end: S.outT,
         replace,
         audioKeep: audioKeep(c),
+        audioGains: audioGains(c),
         quality: S.exportQuality === "discord" ? `discord:${S.discordMb}` : S.exportQuality,
       });
       const shift = S.inT - r.start;

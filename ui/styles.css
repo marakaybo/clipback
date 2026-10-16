@@ -412,6 +412,19 @@ body.fullview.fv-idle .stage { cursor: none; }
 .track.off canvas { opacity: .25; }
 .track.off canvas.hi { display: none; }
 .track.off .tname { color: var(--text-3); text-decoration: line-through; }
+.track .tvol {
+  position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  display: flex; align-items: center; gap: 6px;
+  font-size: var(--fs-xs); padding: 1px 6px; border-radius: 4px;
+  background: rgba(17,18,20,.88); color: var(--text-3);
+}
+.track .tvol { z-index: 1; cursor: pointer; }
+/* в покое — только «100 %», ползунок раскрывается при наведении */
+.track .tvol input { width: 0; opacity: 0; transition: width .12s, opacity .12s; }
+.track .tvol:hover input, .track .tvol:focus-within input { width: 72px; opacity: 1; }
+.track .tvol span { min-width: 34px; text-align: right; }
+.track .tvol.changed { color: var(--accent); }
+.track.off .tvol { display: none; }
 
 .dim { position: absolute; top: 18px; height: 40px; background: rgba(10,11,12,.62); pointer-events: none; }
 .dim.left { left: 0; border-radius: var(--r-sm) 0 0 var(--r-sm); }

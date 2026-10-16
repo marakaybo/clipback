@@ -162,6 +162,8 @@ fn real_main() -> Result<()> {
                 }
             }
             Event::Error { message } => bail!("{message}"),
+            Event::CaptureBlocked { game, .. } => println!("⚠ {game} не попадает в захват: видеодрайвер выводит игру мимо рабочего стола"),
+            Event::CaptureOk => println!("✔ захват снова работает"),
             // полноценную запись CLI не запускает
             Event::Started { .. } | Event::RecordStarted { .. } | Event::Recorded { .. } | Event::RecordFailed { .. } => {}
         }

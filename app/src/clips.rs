@@ -194,12 +194,14 @@ pub struct TrimOut {
 
 /// Вырезать отрезок: копией рядом или вместо исходного файла.
 /// `quality`: None — без перекодирования (мгновенно), иначе «high» | «medium» | «low».
+#[allow(clippy::too_many_arguments)]
 pub fn trim(
     p: &Path,
     start: f64,
     end: f64,
     replace: bool,
     audio_keep: Option<&[usize]>,
+    audio_gains: Option<&[f32]>,
     quality: Option<&str>,
     progress: &mut dyn FnMut(f64),
 ) -> Result<TrimOut> {
@@ -212,23 +214,25 @@ pub fn trim(
     };
     // «discord:20» — уложить в 20 МБ
     if let Some(mb) = quality.and_then(|q| q.strip_prefix("discord:")).and_then(|v| v.parse::<u64>().ok()) {
-        return trim_to_size(p, &dst, start, end, audio_keep, mb.clamp(1, 10_000) * 1_000_000, progress);
+        return trim_to_size(p, &dst, start, end, audio_keep, audio_gains, mb.clamp(1, 10_000) * 1_000_000, progress);
     }
     let r = match quality.and_then(clipback_core::media::Quality::preset) {
-        Some(q) => clipback_core::media::transcode(p, &dst, start, end, audio_keep, &q, progress)?,
-        None => mux::trim_tracks(p, &dst, start, end, audio_keep)?,
+        Some(q) => clipback_core::media::transcode(p, &dst, start, end, audio_keep, audio_gains, &q, progress)?,
+        None => mux::trim_tracks(p, &dst, start, end, audio_keep, audio_gains)?,
     };
     Ok(TrimOut { clip: entry(&dst)?, start: r.start, end: r.end })
 }
 
 /// Сохранить отрезок так, чтобы файл был не больше `limit` байт (для Discord и мессенджеров).
 /// Звук — одна дорожка: Discord и плееры всё равно играют только первую, а место дорогое.
+#[allow(clippy::too_many_arguments)]
 fn trim_to_size(
     p: &Path,
     dst: &Path,
     start: f64,
     end: f64,
     audio_keep: Option<&[usize]>,
+    audio_gains: Option<&[f32]>,
     limit: u64,
     progress: &mut dyn FnMut(f64),
 ) -> Result<TrimOut> {
@@ -242,7 +246,7 @@ fn trim_to_size(
     let mut squeeze = 1.0;
     for attempt in 0..3 {
         let q = Quality::for_size(limit, secs, keep.len(), squeeze)?;
-        let r = transcode(p, dst, start, end, Some(&keep), &q, progress)?;
+        let r = transcode(p, dst, start, end, Some(&keep), audio_gains, &q, progress)?;
         let size = std::fs::metadata(dst).map(|m| m.len()).unwrap_or(0);
         if size <= limit || attempt == 2 {
             return Ok(TrimOut { clip: entry(dst)?, start: r.start, end: r.end });

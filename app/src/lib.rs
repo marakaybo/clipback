@@ -4,6 +4,7 @@
 mod clips;
 mod indicator;
 mod library;
+mod nvidia;
 mod settings;
 mod sound;
 mod trash;
@@ -58,6 +59,19 @@ struct LiveStatus {
     dropped: u64,
 }
 
+/// Игра на весь экран, которая не попадает в захват (см. `Event::CaptureBlocked`).
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BlockedGame {
+    game: String,
+    /// Программа игры («javaw.exe»), если удалось узнать.
+    exe: Option<String>,
+    /// Видеокарта NVIDIA — можно исправить настройкой драйвера (`nvidia.rs`).
+    nvidia: bool,
+    /// Настройка драйвера для этой программы уже включена — осталось перезапустить игру.
+    driver_ok: bool,
+}
+
 #[derive(Default)]
 struct Inner {
     settings: Settings,
@@ -66,6 +80,10 @@ struct Inner {
     capture: Option<CaptureInfo>,
     status: Option<LiveStatus>,
     error: Option<String>,
+    /// Игра на весь экран, которая сейчас не попадает в захват (плашка с инструкцией).
+    capture_blocked: Option<BlockedGame>,
+    /// О каких играх уже показали уведомление — не чаще раза за запуск программы.
+    blocked_toasted: std::collections::HashSet<String>,
     last_game: Option<String>,
     hotkeys: Vec<(Shortcut, Action)>,
     hotkey_errors: Vec<String>,
@@ -100,6 +118,7 @@ struct StateDto {
     capture: Option<CaptureInfo>,
     status: Option<LiveStatus>,
     error: Option<String>,
+    capture_blocked: Option<BlockedGame>,
     last_game: Option<String>,
     hotkey_errors: Vec<String>,
     record_started: Option<u64>,
@@ -117,6 +136,7 @@ fn dto(i: &Inner) -> StateDto {
         capture: i.capture.clone(),
         status: i.status.clone(),
         error: i.error.clone(),
+        capture_blocked: i.capture_blocked.clone(),
         last_game: i.last_game.clone(),
         hotkey_errors: i.hotkey_errors.clone(),
         record_started: i.record_started,
@@ -273,6 +293,7 @@ fn stop_recording(app: &AppHandle) {
     let rec = {
         let mut i = lock(app);
         i.status = None;
+        i.capture_blocked = None;
         i.record_started = None;
         i.recorder.take()
     };
@@ -344,12 +365,32 @@ fn forward_events(app: AppHandle, events: mpsc::Receiver<Event>, generation: u64
                 emit_state(&app);
                 show_toast(&app, "Запись не удалась", &message, "error");
             }
+            Event::CaptureBlocked { game, exe } => {
+                let nvidia = lock(&app).capture.as_ref().is_some_and(|c| c.gpu.to_uppercase().contains("NVIDIA"));
+                // настройка уже включена (игру не перезапускали) — только чтение настроек драйвера
+                let driver_ok = nvidia && exe.as_deref().is_some_and(|e| matches!(nvidia::present_method(e), Ok(nvidia::PREFER_DXGI)));
+                log(format!("захват: «{game}» ({}) не попадает в запись; видеокарта NVIDIA: {nvidia}, настройка DXGI уже включена: {driver_ok}", exe.as_deref().unwrap_or("?")));
+                let first = {
+                    let mut i = lock(&app);
+                    i.capture_blocked = Some(BlockedGame { game: game.clone(), exe, nvidia, driver_ok });
+                    i.blocked_toasted.insert(game.clone())
+                };
+                emit_state(&app);
+                if first {
+                    show_toast(&app, &format!("{game} не записывается"), "Как исправить — в окне Clipback", "error");
+                }
+            }
+            Event::CaptureOk => {
+                lock(&app).capture_blocked = None;
+                emit_state(&app);
+            }
             Event::Error { message } => {
                 log(format!("ошибка записи: {message}"));
                 let rec = {
                     let mut i = lock(&app);
                     i.error = Some(message.clone());
                     i.status = None;
+                    i.capture_blocked = None;
                     i.record_started = None;
                     i.recorder.take()
                 };
@@ -371,6 +412,7 @@ fn forward_events(app: AppHandle, events: mpsc::Receiver<Event>, generation: u64
             let mut i = lock(&app);
             i.error = Some("поток захвата неожиданно завершился".into());
             i.status = None;
+            i.capture_blocked = None;
             i.record_started = None;
             i.recorder.take()
         };
@@ -906,6 +948,33 @@ fn auto_clean_later(app: &AppHandle) {
     std::thread::spawn(move || auto_clean(&app));
 }
 
+/// Включить для игры, которая не попадает в захват, настройку NVIDIA «Использовать цепочку
+/// буферов DXGI» — только для её программы. Windows может спросить права администратора.
+#[tauri::command]
+async fn fix_capture_blocked(app: AppHandle) -> Res<()> {
+    let exe = lock(&app).capture_blocked.as_ref().and_then(|b| b.exe.clone()).ok_or("не знаю, какая программа у игры")?;
+    let r = tauri::async_runtime::spawn_blocking({
+        let exe = exe.clone();
+        move || nvidia::enable_dxgi_elevating(&exe)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    match r {
+        Ok(()) => {
+            log(format!("настройка NVIDIA «цепочка буферов DXGI» включена для {exe}"));
+            if let Some(b) = lock(&app).capture_blocked.as_mut() {
+                b.driver_ok = true;
+            }
+            emit_state(&app);
+            Ok(())
+        }
+        Err(e) => {
+            log(format!("настройка NVIDIA для {exe}: {e}"));
+            Err(e)
+        }
+    }
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn trim_clip(
@@ -915,6 +984,8 @@ async fn trim_clip(
     end: f64,
     replace: bool,
     audio_keep: Option<Vec<usize>>,
+    // громкость каждой дорожки файла (1 — как есть); None — не менялась
+    audio_gains: Option<Vec<f32>>,
     quality: Option<String>,
 ) -> Res<clips::TrimOut> {
     let p = checked_path(&app, &path)?;
@@ -928,7 +999,7 @@ async fn trim_clip(
             let _ = progress_app.emit("export-progress", f);
         }
     };
-    let mut r = clips::trim(&p, start, end, replace, audio_keep.as_deref(), q.as_deref(), &mut progress).map_err(|e| {
+    let mut r = clips::trim(&p, start, end, replace, audio_keep.as_deref(), audio_gains.as_deref(), q.as_deref(), &mut progress).map_err(|e| {
         log(format!("не удалось сохранить отрезок: {e:#}"));
         format!("{e:#}")
     })?;
@@ -1336,6 +1407,10 @@ fn stop_for_exit(app: &AppHandle) {
 
 pub fn run() {
     let args: Vec<String> = std::env::args().collect();
+    // копия с правами администратора для настройки драйвера NVIDIA — без окна и проверки второй копии
+    if let Some(code) = nvidia::run_task(&args) {
+        std::process::exit(code);
+    }
     update::finish_previous(&args);
     let start_hidden = args.iter().any(|a| a == "--minimized");
 
@@ -1417,6 +1492,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_state,
+            fix_capture_blocked,
             set_recording,
             save_replay_cmd,
             toggle_record_cmd,

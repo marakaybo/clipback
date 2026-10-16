@@ -77,6 +77,11 @@ pub enum Event {
     #[serde(rename_all = "camelCase")]
     Recorded { path: PathBuf, seconds: f64, bytes: u64 },
     RecordFailed { message: String },
+    /// Игра на весь экран не попадает в захват (см. `Duplicator::keeps_losing`):
+    /// в запись идёт кадр раз в несколько секунд. Исправляется настройкой игры или драйвера.
+    CaptureBlocked { game: String, exe: Option<String> },
+    /// Кадры экрана снова идут.
+    CaptureOk,
     Error { message: String },
 }
 
@@ -241,6 +246,8 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
     let mut stale_note: Option<Instant> = None; // когда писали «экран не обновляется»
     let mut stale_logged = false;
     let mut kicks_in_row = 0u32;
+    // игра, которая сейчас не попадает в захват (о ней уже сообщили)
+    let mut blocked: Option<String> = None;
     let mut health = Health::new();
 
     let frame_ns = 1_000_000_000u64 / fps as u64;
@@ -361,9 +368,16 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
             let got = dup.acquire(wait_ms)?;
             dbg.acquire_ms += t_acq.elapsed().as_secs_f64() * 1000.0;
             match got {
-                Frame::New(tex) => {
+                Frame::New { tex, image } => {
                     dbg.new_frames += 1;
-                    health.new_frames += 1;
+                    if !image && have_frame {
+                        // сдвинулась только мышь: картинка та же, курсор перерисуется сам
+                        // (`pointer_changed`). Копировать нечего, ждём кадр с картинкой дальше.
+                        health.pointer_frames += 1;
+                        dup.release();
+                        continue;
+                    }
+                    health.image_frames += 1;
                     let gap = last_new.elapsed();
                     if gap > health.longest_gap {
                         health.longest_gap = gap;
@@ -419,6 +433,23 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
                         ));
                     }
                 }
+            }
+            if dup.keeps_losing() {
+                if blocked.is_none() {
+                    if let Some(title) = crate::util::fullscreen_window_on(mon_rect) {
+                        let game = crate::util::clip_label(&title).unwrap_or_else(|| title.clone());
+                        crate::util::log(format!(
+                            "захват: «{title}» не попадает в захват — видеодрайвер выводит игру мимо рабочего стола ({})",
+                            dup.stats.last_error
+                        ));
+                        let exe = crate::util::foreground_window().and_then(|(_, pid)| crate::util::exe_name(pid));
+                        let _ = events.send(Event::CaptureBlocked { game: game.clone(), exe });
+                        blocked = Some(game);
+                    }
+                }
+            } else if let Some(game) = blocked.take() {
+                crate::util::log(format!("захват: кадры снова идут (игра «{game}»)"));
+                let _ = events.send(Event::CaptureOk);
             }
             if health.since.elapsed() >= crate::audio::Diag::every() * 2 {
                 health.report(&mut dup.stats, dropped);
@@ -520,22 +551,25 @@ impl Drop for Finishing {
 /// Сводка о захвате за 10 минут — в журнал.
 struct Health {
     since: Instant,
-    new_frames: u64,
+    /// Кадров с новой картинкой и кадров, где сдвинулась только мышь.
+    image_frames: u64,
+    pointer_frames: u64,
     kicks: u32,
     longest_gap: Duration,
 }
 
 impl Health {
     fn new() -> Self {
-        Self { since: Instant::now(), new_frames: 0, kicks: 0, longest_gap: Duration::ZERO }
+        Self { since: Instant::now(), image_frames: 0, pointer_frames: 0, kicks: 0, longest_gap: Duration::ZERO }
     }
 
     fn report(&self, cap: &mut crate::capture::CapStats, dropped_total: u64) {
         let mins = self.since.elapsed().as_secs_f64() / 60.0;
         let err = if cap.last_error.is_empty() { String::new() } else { format!(", последняя ошибка: {}", cap.last_error) };
         crate::util::log(format!(
-            "захват за {mins:.0} мин: новых кадров экрана {}, самая долгая пауза {:.0} с, потерь захвата {}, ошибок {}, пересозданий {} (неудачных {}), перезапусков сторожем {}, пропущено кадров видео всего {dropped_total}{err}",
-            self.new_frames,
+            "захват за {mins:.0} мин: кадров с новой картинкой {}, только движений мыши {}, самая долгая пауза картинки {:.0} с, потерь захвата {}, ошибок {}, пересозданий {} (неудачных {}), перезапусков сторожем {}, пропущено кадров видео всего {dropped_total}{err}",
+            self.image_frames,
+            self.pointer_frames,
             self.longest_gap.as_secs_f64(),
             cap.losses,
             cap.errors,

@@ -130,7 +130,7 @@ fn records_saves_and_trims() {
 
     // отрезок без звука
     let mute = out.join("hw-test-mute.mp4");
-    mux::trim_tracks(&path, &mute, 0.0, 2.0, Some(&[])).unwrap();
+    mux::trim_tracks(&path, &mute, 0.0, 2.0, Some(&[]), None).unwrap();
     assert_eq!(mux::clip_info(&mute).unwrap().audio_tracks, 0);
 
     let _ = std::fs::remove_file(path);
@@ -156,7 +156,7 @@ fn transcode_and_peaks_on_real_clip() {
     for q in ["high", "medium", "low"] {
         let dst = std::env::temp_dir().join(format!("clipback-transcode-{q}.mp4"));
         let t = Instant::now();
-        let r = transcode(&src, &dst, 3.0, 9.0, None, &Quality::preset(q).unwrap(), &mut |_| {}).unwrap();
+        let r = transcode(&src, &dst, 3.0, 9.0, None, None, &Quality::preset(q).unwrap(), &mut |_| {}).unwrap();
         let o = mux::clip_info(&dst).unwrap();
         let size = std::fs::metadata(&dst).unwrap().len() as f64 / 1048576.0;
         println!("{q}: {:.2}–{:.2} с за {:?} → {:.2} с, {}×{}, {:.0} к/с, {size:.1} МБ, дорожки {:?}", r.start, r.end, t.elapsed(), o.duration, o.width, o.height, o.fps, o.audio_names);
@@ -167,10 +167,50 @@ fn transcode_and_peaks_on_real_clip() {
     }
     // без микрофона и общей дорожки
     let dst = std::env::temp_dir().join("clipback-transcode-nomic.mp4");
-    transcode(&src, &dst, 0.0, 2.0, Some(&[1]), &Quality::preset("low").unwrap(), &mut |_| {}).unwrap();
+    transcode(&src, &dst, 0.0, 2.0, Some(&[1]), None, &Quality::preset("low").unwrap(), &mut |_| {}).unwrap();
     assert_eq!(mux::clip_info(&dst).unwrap().audio_tracks, 1);
 }
 
+
+/// Громкость дорожек при сохранении отрезка: микрофон выключен (0), система вдвое громче.
+/// Видео копируется, звук перекодируется; «Всё вместе» сводится заново — без микрофона.
+#[test]
+#[ignore]
+fn track_gains_on_real_clip() {
+    use clipback_core::media::audio_peaks;
+    let src = std::path::PathBuf::from(std::env::var("CLIPBACK_TEST_CLIP").expect("укажите CLIPBACK_TEST_CLIP"));
+    let info = mux::clip_info(&src).unwrap();
+    assert_eq!(info.audio_names, ["Всё вместе", "Звук системы", "Микрофон"], "нужен клип с тремя дорожками");
+    let max = |p: &[f32]| p.iter().cloned().fold(0f32, f32::max);
+    let plain = std::env::temp_dir().join("clipback-gain-plain.mp4");
+    let loud = std::env::temp_dir().join("clipback-gain-loud.mp4");
+    mux::trim_tracks(&src, &plain, 10.0, 30.0, None, None).unwrap();
+    let t = Instant::now();
+    let r = mux::trim_tracks(&src, &loud, 10.0, 30.0, None, Some(&[1.0, 2.0, 0.0])).unwrap();
+    println!("отрезок {:.2}–{:.2} с с громкостью за {:?}", r.start, r.end, t.elapsed());
+    let (a, b) = (mux::clip_info(&plain).unwrap(), mux::clip_info(&loud).unwrap());
+    assert_eq!(b.audio_names, a.audio_names);
+    assert!((a.duration - b.duration).abs() < 0.05, "{} vs {}", a.duration, b.duration);
+    let pa = audio_peaks(&plain, 200, a.duration).unwrap();
+    let pb = audio_peaks(&loud, 200, b.duration).unwrap();
+    println!("пики как есть: {:?}", pa.iter().map(|p| max(p)).collect::<Vec<_>>());
+    println!("пики с громкостью: {:?}", pb.iter().map(|p| max(p)).collect::<Vec<_>>());
+    assert!(max(&pb[2]) < 0.01, "микрофон должен стать тишиной");
+    assert!(max(&pb[1]) > max(&pa[1]) * 1.5 || max(&pb[1]) > 0.9, "система должна стать громче");
+    // «Всё вместе» без микрофона = система ×2: огибающие совпадают по времени
+    let diff: f32 = pb[0].iter().zip(&pb[1]).map(|(x, y)| (x - y).abs()).sum::<f32>() / pb[0].len() as f32;
+    println!("средняя разница «Всё вместе» и системы: {diff:.4}");
+    assert!(diff < 0.02, "сведение должно совпасть с системным звуком");
+    // звук не съехал: огибающая системы в обоих файлах совпадает по времени (с точностью до бина)
+    let lag = (-3i32..=3)
+        .min_by(|&x, &y| {
+            let e = |d: i32| (10..190).map(|i| (pa[1][i] * 2.0 - pb[1][(i as i32 + d) as usize].min(1.0)).abs()).sum::<f32>();
+            e(x).partial_cmp(&e(y)).unwrap()
+        })
+        .unwrap();
+    println!("сдвиг звука системы: {lag} бин(ов) по 0,1 с");
+    assert_eq!(lag, 0);
+}
 
 /// Что запись реально получает с микрофона: CLIPBACK_TEST_SECS секунд (по умолчанию 6), раз в секунду.
 #[test]

@@ -405,19 +405,19 @@ impl SourceKind {
     }
 }
 
-/// Микрофон молчит дольше — переоткрываем поток.
+/// Микрофон не присылает данных дольше — переоткрываем поток.
+/// (Тишину не считаем поломкой: человек молчит, шумодав глушит фон, кнопка «без звука».
+/// Раньше тишина дольше минуты тоже вела к переоткрытию — это была догадка до того,
+/// как в 0.4.4 нашлась настоящая причина пропадания микрофона, уход его часов.)
 const MIC_STALL: Duration = Duration::from_secs(2);
-const MIC_SILENT: Duration = Duration::from_secs(60);
-/// Тише этого — не звук, а «цифровой ноль» или шум (−70 дБ).
-const MIC_QUIET: f32 = 3e-4;
 
-/// Переоткрытие микрофона — в журнал, но не чаще раза в 10 минут (в паузах оно бывает часто).
-fn note_reopen(stalled: bool) {
+/// Переоткрытие микрофона — в журнал, но не чаще раза в 10 минут.
+fn note_reopen() {
     static LAST: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
     let mut l = LAST.lock().unwrap_or_else(|e| e.into_inner());
     if l.is_none_or(|t| t.elapsed() > Duration::from_secs(600)) {
         *l = Some(Instant::now());
-        crate::util::log(if stalled { "микрофон перестал присылать звук — переоткрываю" } else { "микрофон минуту в тишине — переоткрываю на всякий случай" });
+        crate::util::log("микрофон перестал присылать звук — переоткрываю");
     }
 }
 
@@ -492,7 +492,6 @@ pub struct AudioApp {
 
 /// Приложения, которые сейчас выводят (или недавно выводили) звук — для выбора дорожек.
 pub fn list_audio_apps() -> Result<Vec<AudioApp>> {
-    use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let en: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
@@ -508,16 +507,7 @@ pub fn list_audio_apps() -> Result<Vec<AudioApp>> {
             if pid == 0 || pid == me {
                 continue;
             }
-            let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { continue };
-            let mut buf = [0u16; 512];
-            let mut len = buf.len() as u32;
-            let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, windows::core::PWSTR(buf.as_mut_ptr()), &mut len).is_ok();
-            let _ = windows::Win32::Foundation::CloseHandle(h);
-            if !ok {
-                continue;
-            }
-            let path = String::from_utf16_lossy(&buf[..len as usize]);
-            let exe = path.rsplit('\\').next().unwrap_or(&path).to_string();
+            let Some(exe) = crate::util::exe_name(pid) else { continue };
             if out.iter().any(|a| a.exe.eq_ignore_ascii_case(&exe)) {
                 continue;
             }
@@ -716,13 +706,10 @@ fn run_source(index: usize, kind: &SourceKind, t0: i64, out: &Sender<Chunk>, sto
         diag.rate = o.rate;
         let mut frames_buf: Vec<(f32, f32)> = Vec::with_capacity(4800);
         let mut last_check = Instant::now();
-        // микрофон иногда «замолкает»: поток открыт, ошибок нет, а данных или звука нет
-        // (USB уснул, программа микрофона перенастроила его). Тогда переоткрываем поток —
-        // ровно то, что помогало при повторном выборе микрофона в настройках.
+        // микрофон иногда «замолкает»: поток открыт, ошибок нет, а данных нет (USB уснул).
+        // Тогда переоткрываем поток — то, что помогало при повторном выборе микрофона.
         let is_mic = matches!(kind, SourceKind::Mic(_));
-        let opened_at = Instant::now();
         let mut last_packet = Instant::now();
-        let mut last_sound = Instant::now();
         // обычная задержка: насколько конец куска отстаёт от «сейчас», кадры 48 кГц
         let mut lag: Option<i64> = None;
         let mut placed = Vec::new();
@@ -760,9 +747,6 @@ fn run_source(index: usize, kind: &SourceKind, t0: i64, out: &Sender<Chunk>, sto
                         diag.peak = diag.peak.max(l.abs()).max(r.abs());
                     }
                     last_packet = Instant::now();
-                    if frames_buf.iter().any(|&(l, r)| l.abs().max(r.abs()) > MIC_QUIET) {
-                        last_sound = last_packet;
-                    }
 
                     let mut samples = Vec::with_capacity(frames as usize * 2 + 8);
                     rs.set_correction(placer.correction());
@@ -791,10 +775,8 @@ fn run_source(index: usize, kind: &SourceKind, t0: i64, out: &Sender<Chunk>, sto
                     }
                 }
                 if is_mic {
-                    let stalled = last_packet.elapsed() > MIC_STALL;
-                    let silent = last_sound.elapsed() > MIC_SILENT && opened_at.elapsed() > MIC_SILENT;
-                    if stalled || silent {
-                        note_reopen(stalled);
+                    if last_packet.elapsed() > MIC_STALL {
+                        note_reopen();
                         diag.reopens += 1;
                         return Ok(());
                     }

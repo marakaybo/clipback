@@ -75,6 +75,8 @@
     capture: { encoder: "NVIDIA H.264 Encoder MFT", gpu: "NVIDIA GeForce RTX 5060 Ti", monitor: "DISPLAY1", width: 2560, height: 1440, fps: 60, audio: ["Всё вместе", "Звук системы", "Микрофон"], audioError: null },
     status: { bufferedSecs: 0, bufferBytes: 0, fps: 60, dropped: 0 },
     error: null, lastGame: "Battlefield 6", hotkeyErrors: [], settings, version: "0.1.0", portable: true,
+    // ?blocked — показать плашку «игра не попадает в запись»
+    captureBlocked: location.search.includes("blocked") ? { game: "Minecraft 26.1.2", exe: "javaw.exe", nvidia: true, driverOk: false } : null,
   };
   const started = Date.now();
   setInterval(() => {
@@ -90,6 +92,11 @@
 
   const handlers = {
     get_state: () => state,
+    fix_capture_blocked: async () => {
+      await new Promise((r) => setTimeout(r, 600));
+      if (state.captureBlocked) state.captureBlocked.driverOk = true;
+      emit("state", state);
+    },
     save_edited_image: ({ path, replace }) => {
       const c = find(path);
       if (replace) { c.modified = Date.now(); return { ...c }; }

@@ -378,7 +378,7 @@ pub struct TrimResult {
 
 /// Вырезать кусок [start; end) секунд без перекодирования, со всеми звуковыми дорожками.
 pub fn trim(src: &Path, dst: &Path, start: f64, end: f64) -> Result<TrimResult> {
-    trim_tracks(src, dst, start, end, None)
+    trim_tracks(src, dst, start, end, None, None)
 }
 
 struct AudioCut {
@@ -392,7 +392,7 @@ struct AudioCut {
 
 /// То же, но оставить только звуковые дорожки с номерами `audio_keep` (с нуля, в порядке файла).
 /// Начало сдвигается назад к ближайшему ключевому кадру (не больше чем на секунду).
-pub fn trim_tracks(src: &Path, dst: &Path, start: f64, end: f64, audio_keep: Option<&[usize]>) -> Result<TrimResult> {
+pub fn trim_tracks(src: &Path, dst: &Path, start: f64, end: f64, audio_keep: Option<&[usize]>, audio_gains: Option<&[f32]>) -> Result<TrimResult> {
     if end <= start {
         bail!("конец отрезка раньше начала");
     }
@@ -442,7 +442,16 @@ pub fn trim_tracks(src: &Path, dst: &Path, start: f64, end: f64, audio_keep: Opt
     let keep: Vec<u32> = keep_idx.iter().map(|&i| all_audio[i]).collect();
     let mut kept_names: Vec<String> = Vec::new();
     let mut audio = Vec::new();
-    for aid in keep {
+    // громкость дорожек менялась: звук перекодируется, видео по-прежнему копируется как есть
+    let mut regained: Vec<Vec<(i64, Bytes)>> = Vec::new();
+    if audio_gains.is_some_and(|g| g.iter().any(|&x| (x - 1.0).abs() >= 1e-3)) {
+        let (tracks, names) = crate::media::audio_segment(src, v_start, v_end, audio_keep, audio_gains)?;
+        let silence = crate::aac::silent_frame()?;
+        let end_samples = ((v_end - v_start) * crate::audio::RATE as f64).round() as i64;
+        regained = tracks.iter().map(|t| layout_audio(&AudioInput { packets: t, silence: &silence }, 0, end_samples)).collect();
+        kept_names = names;
+    }
+    for aid in keep.into_iter().filter(|_| regained.is_empty()) {
         let t = &r.tracks()[&aid];
         let cfg = AacConfig { bitrate: t.bitrate(), profile: t.audio_profile()?, freq_index: t.sample_freq_index()?, chan_conf: t.channel_config()? };
         let ats = t.timescale() as f64;
@@ -467,6 +476,11 @@ pub fn trim_tracks(src: &Path, dst: &Path, start: f64, end: f64, audio_keep: Opt
         for a in &audio {
             add_audio(&mut wr, a.cfg.clone(), a.ts as u32)?;
         }
+        for _ in &regained {
+            add_audio(&mut wr, our_aac(), crate::audio::RATE)?;
+        }
+        let rate = crate::audio::RATE as f64;
+        let mut next_re = vec![0usize; regained.len()];
         let base = times[first as usize - 1];
         let mut next: Vec<u32> = audio.iter().map(|a| a.first).collect();
         for i in first..=last {
@@ -483,7 +497,21 @@ pub fn trim_tracks(src: &Path, dst: &Path, start: f64, end: f64, audio_keep: Opt
                     next[k] += 1;
                 }
             }
+            for (k, t) in regained.iter().enumerate() {
+                while let Some((pos, data)) = t.get(next_re[k]) {
+                    if *pos as f64 / rate > vt {
+                        break;
+                    }
+                    wr.write_sample(k as u32 + 2, &audio_sample(*pos, data.clone()))?;
+                    next_re[k] += 1;
+                }
+            }
             wr.write_sample(1, &Mp4Sample { start_time: s.start_time - base, ..s })?;
+        }
+        for (k, t) in regained.iter().enumerate() {
+            for (pos, data) in &t[next_re[k]..] {
+                wr.write_sample(k as u32 + 2, &audio_sample(*pos, data.clone()))?;
+            }
         }
         for (k, a) in audio.iter().enumerate() {
             while next[k] <= a.last {

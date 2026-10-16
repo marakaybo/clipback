@@ -43,6 +43,10 @@ const ALL_STREAMS: u32 = MF_SOURCE_READER_ALL_STREAMS.0 as u32;
 const FIRST_VIDEO: u32 = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
 const EOS: u32 = MF_SOURCE_READERF_ENDOFSTREAM.0 as u32;
 
+/// Насколько звук на выходе декодера отстаёт от позиции первого поданного кадра (отсчёты 48 кГц).
+/// Проверяется тестом `aac_round_trip_delay` вместе с кодировщиком Clipback.
+const DECODE_DELAY: i64 = 0;
+
 /// Декодер AAC Windows: сырые кадры AAC-LC 48 кГц стерео -> PCM 16 бит.
 struct AacDecoder {
     mft: IMFTransform,
@@ -79,8 +83,22 @@ impl AacDecoder {
         Ok(Self { mft, out_size: info.cbSize.max(16384) })
     }
 
-    /// Раскодировать кадр; для каждого полученного стерео-кадра вызывается `f(номер, пик)`.
+    /// Раскодировать кадр; для каждого полученного стерео-кадра вызывается `f(пик)`.
     unsafe fn decode(&mut self, data: &[u8], f: &mut dyn FnMut(f32)) -> Result<()> {
+        self.feed(data, &mut |pcm| {
+            for fr in pcm.chunks(2) {
+                f(fr.iter().map(|&x| (x as f32 / 32768.0).abs()).fold(0f32, f32::max));
+            }
+        })
+    }
+
+    /// Раскодировать кадр в стерео −1…1 и дописать в `out`.
+    unsafe fn decode_pcm(&mut self, data: &[u8], out: &mut Vec<f32>) -> Result<()> {
+        self.feed(data, &mut |pcm| out.extend(pcm.iter().map(|&x| x as f32 / 32768.0)))
+    }
+
+    /// Подать кадр AAC; каждый готовый кусок PCM (16 бит, стерео) отдаётся в `f`.
+    unsafe fn feed(&mut self, data: &[u8], f: &mut dyn FnMut(&[i16])) -> Result<()> {
         let buf = MFCreateMemoryBuffer(data.len() as u32)?;
         let mut p = std::ptr::null_mut();
         buf.Lock(&mut p, None, None)?;
@@ -108,10 +126,7 @@ impl AacDecoder {
             let mut q = std::ptr::null_mut();
             let mut len = 0u32;
             b.Lock(&mut q, None, Some(&mut len))?;
-            let pcm = std::slice::from_raw_parts(q as *const i16, len as usize / 2);
-            for fr in pcm.chunks(2) {
-                f(fr.iter().map(|&x| (x as f32 / 32768.0).abs()).fold(0f32, f32::max));
-            }
+            f(std::slice::from_raw_parts(q as *const i16, len as usize / 2));
             b.Unlock()?;
         }
     }
@@ -144,6 +159,108 @@ pub fn audio_peaks(path: &Path, bins: usize, duration: f64) -> Result<Vec<Vec<f3
         out.push(peaks);
     }
     Ok(out)
+}
+
+/// Громкость дорожки «как есть».
+fn unchanged(g: f32) -> bool {
+    (g - 1.0).abs() < 1e-3
+}
+
+/// Звук отрезка [start; end) секунд: кадры AAC дорожек `keep` (None — всех) и их названия,
+/// позиции — в отсчётах 48 кГц от `start`.
+/// `gains` — громкость каждой дорожки файла по номеру (1 — как есть, 0 — тишина, до 4).
+/// Пока все громкости 1, кадры копируются без перекодирования. Иначе изменённые дорожки
+/// раскодируются, умножаются и кодируются заново, а «Всё вместе» сводится заново из «Звука
+/// системы» и «Микрофона» с их громкостями — так же, как при записи (`mixer::render_track`).
+pub fn audio_segment(
+    src: &Path,
+    start: f64,
+    end: f64,
+    keep: Option<&[usize]>,
+    gains: Option<&[f32]>,
+) -> Result<(Vec<Vec<Arc<AudioPacket>>>, Vec<String>)> {
+    let Some(gains) = gains.filter(|g| g.iter().any(|&x| !unchanged(x))) else {
+        return mux::read_audio_segment(src, start, end, keep);
+    };
+    let (all, names) = mux::read_audio_segment(src, start, end, None)?;
+    let gain = |i: usize| gains.get(i).copied().unwrap_or(1.0).clamp(0.0, 4.0);
+    let idx: Vec<usize> = match keep {
+        Some(k) => k.iter().copied().filter(|&i| i < all.len()).collect(),
+        None => (0..all.len()).collect(),
+    };
+    let sys = names.iter().position(|n| n == "Звук системы");
+    let mic = names.iter().position(|n| n == "Микрофон");
+    let mix_sources = match (names.first().map(String::as_str), sys, mic) {
+        (Some("Всё вместе"), Some(s), Some(m)) => Some((s, m)),
+        _ => None,
+    };
+
+    let _mf = MfScope::new()?;
+    let mut tracks = Vec::new();
+    let mut out_names = Vec::new();
+    for i in idx {
+        let packets = &all[i];
+        let new = match mix_sources {
+            Some((s, m)) if i == 0 => {
+                if unchanged(gain(s)) && unchanged(gain(m)) && unchanged(gain(0)) {
+                    None
+                } else {
+                    let (sp, sv) = decode_track(&all[s])?;
+                    let (mp, mv) = decode_track(&all[m])?;
+                    let from = sp.min(mp);
+                    let len = ((sp + sv.len() as i64 / 2).max(mp + mv.len() as i64 / 2) - from).max(0) as usize;
+                    let mut mix = vec![0f32; len * 2];
+                    for (p0, v, g) in [(sp, &sv, gain(s)), (mp, &mv, gain(m))] {
+                        let off = (p0 - from) as usize * 2;
+                        for (k, x) in v.iter().enumerate() {
+                            mix[off + k] += x * g;
+                        }
+                    }
+                    let g0 = gain(0);
+                    mix.iter_mut().for_each(|x| *x = crate::mixer::soft_clip(*x * g0));
+                    Some(encode_track(from, &mix)?)
+                }
+            }
+            _ if unchanged(gain(i)) => None,
+            _ => {
+                let (p0, mut v) = decode_track(packets)?;
+                let g = gain(i);
+                // громче исходного — мягкое ограничение, как при записи
+                v.iter_mut().for_each(|x| *x = if g > 1.0 { crate::mixer::soft_clip(*x * g) } else { *x * g });
+                Some(encode_track(p0, &v)?)
+            }
+        };
+        tracks.push(new.unwrap_or_else(|| packets.clone()));
+        out_names.push(names.get(i).cloned().unwrap_or_default());
+    }
+    Ok((tracks, out_names))
+}
+
+/// Раскодировать дорожку: позиция первого отсчёта и звук подряд (стерео −1…1).
+fn decode_track(packets: &[Arc<AudioPacket>]) -> Result<(i64, Vec<f32>)> {
+    let first = packets.first().map_or(0, |p| p.pos);
+    let mut dec = unsafe { AacDecoder::new()? };
+    let mut out = Vec::with_capacity(packets.len() * crate::aac::FRAME as usize * 2);
+    for p in packets {
+        unsafe { dec.decode_pcm(&p.data, &mut out)? };
+    }
+    Ok((first + DECODE_DELAY, out))
+}
+
+/// Закодировать звук обратно в кадры AAC с позициями от `pos`.
+fn encode_track(pos: i64, samples: &[f32]) -> Result<Vec<Arc<AudioPacket>>> {
+    let mut enc = crate::aac::AacEncoder::new()?;
+    let mut out = Vec::new();
+    // кусками по секунде; в конце — немного тишины, иначе кодировщик придержит последние кадры
+    // (лишнее за концом видео отрежет сборка файла)
+    let step = crate::audio::RATE as usize * 2;
+    let mut p = pos;
+    for chunk in samples.chunks(step) {
+        enc.encode(p, chunk, &mut out)?;
+        p += chunk.len() as i64 / 2;
+    }
+    enc.encode(p, &vec![0.0; crate::aac::FRAME as usize * 2 * 4], &mut out)?;
+    Ok(out.into_iter().map(Arc::new).collect())
 }
 
 /// Качество сохранения отрезка.
@@ -237,13 +354,15 @@ fn device() -> Result<(ID3D11Device, ID3D11DeviceContext)> {
 }
 
 /// Сохранить отрезок [start; end) в другом качестве: видео перекодируется на видеокарте
-/// (начало — точно по кадру), звук копируется без изменений.
+/// (начало — точно по кадру), звук копируется без изменений, если громкость дорожек не менялась.
+#[allow(clippy::too_many_arguments)]
 pub fn transcode(
     src: &Path,
     dst: &Path,
     start: f64,
     end: f64,
     audio_keep: Option<&[usize]>,
+    audio_gains: Option<&[f32]>,
     q: &Quality,
     progress: &mut dyn FnMut(f64),
 ) -> Result<TrimResult> {
@@ -345,8 +464,8 @@ pub fn transcode(
         bail!("кодировщик не начал с ключевого кадра");
     }
 
-    // звук: те же кадры AAC из исходника, сдвинутые к началу отрезка
-    let (tracks, names) = mux::read_audio_segment(src, first_ts as f64 / 1e7, last_end as f64 / 1e7, audio_keep)?;
+    // звук: те же кадры AAC из исходника, сдвинутые к началу отрезка (или с другой громкостью)
+    let (tracks, names) = audio_segment(src, first_ts as f64 / 1e7, last_end as f64 / 1e7, audio_keep, audio_gains)?;
     let silence = if tracks.is_empty() { Vec::new() } else { crate::aac::silent_frame()? };
     let inputs: Vec<mux::AudioInput> = tracks.iter().map(|t| mux::AudioInput { packets: t, silence: &silence }).collect();
     mux::write_av_named(dst, &packets, &inputs, &names, out_w, out_h)?;
@@ -357,6 +476,34 @@ pub fn transcode(
 /// Звук из AAC-пакетов файла — для перекодирования (данные не меняются).
 pub(crate) fn packet(data: Vec<u8>, pos: i64) -> Arc<AudioPacket> {
     Arc::new(AudioPacket { data, pos })
+}
+
+#[cfg(test)]
+mod codec_tests {
+    use super::*;
+
+    /// Щелчок через кодировщик и декодер AAC Windows: где он оказался на выходе.
+    #[test]
+    fn aac_round_trip_delay() {
+        let _mf = MfScope::new().unwrap();
+        let mut enc = crate::aac::AacEncoder::new().unwrap();
+        let n = 48_000usize;
+        let mut pcm = vec![0f32; n * 2];
+        for k in 0..64 {
+            pcm[(10_000 + k) * 2] = 0.8;
+            pcm[(10_000 + k) * 2 + 1] = 0.8;
+        }
+        let mut packets = Vec::new();
+        enc.encode(0, &pcm, &mut packets).unwrap();
+        let mut dec = unsafe { AacDecoder::new().unwrap() };
+        let mut out = Vec::new();
+        for p in &packets {
+            unsafe { dec.decode_pcm(&p.data, &mut out).unwrap() };
+        }
+        let peak = out.chunks(2).position(|f| f[0].abs() > 0.3).expect("щелчок потерялся");
+        println!("первый пакет pos={}, пакетов {}, отсчётов на выходе {}, щелчок на {}", packets[0].pos, packets.len(), out.len() / 2, peak);
+        assert!((peak as i64 - 10_000 - DECODE_DELAY).abs() < 64, "щелчок на {peak}, ждали {}", 10_000 + DECODE_DELAY);
+    }
 }
 
 #[cfg(test)]

@@ -13,7 +13,8 @@ use crate::cursor::{Pointer, PointerShape};
 
 pub enum Frame {
     /// Новый кадр. Текстуру нужно скопировать и затем вызвать `release`.
-    New(ID3D11Texture2D),
+    /// `image` — изменилась картинка; если нет, сдвинулась только мышь (текстура — прежний экран).
+    New { tex: ID3D11Texture2D, image: bool },
     /// Нового кадра нет: экран не изменился или захват ждёт следующей попытки.
     Timeout,
     /// Захват только что пересоздан — кадров с него ещё не было.
@@ -82,8 +83,11 @@ pub struct CapStats {
     pub last_error: String,
 }
 
+/// Текст ошибки одной строкой с кодом (у DXGI он многострочный: «…Включите уровень отладки D3D…»).
 fn describe(e: &windows::core::Error) -> String {
-    format!("{} (0x{:08X})", e.message().trim(), e.code().0 as u32)
+    let msg = e.message();
+    let first = msg.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    format!("{first} (0x{:08X})", e.code().0 as u32)
 }
 
 impl Duplicator {
@@ -145,6 +149,15 @@ impl Duplicator {
         self.stats.losses += 1;
         self.drop_dup();
         self.retry_at = now + retry_delay(self.losses_in_row);
+    }
+
+    /// Захват теряется снова и снова (5 раз подряд — несколько Alt+Tab так не выглядят).
+    /// Так бывает, когда видеодрайвер выводит игру прямо на монитор, мимо рабочего стола
+    /// Windows: эксклюзивный полноэкранный режим, а у OpenGL-игр на NVIDIA (Minecraft) —
+    /// и окно без рамки. Desktop Duplication тогда получает кадр только при переподключении,
+    /// Windows.Graphics.Capture — тоже ничего (проверено `examples/capture_probe.rs`).
+    pub fn keeps_losing(&self) -> bool {
+        self.losses_in_row >= 5 && self.last_loss.is_some_and(|t| t.elapsed() < LOSS_WINDOW)
     }
 
     /// Захват сейчас закрыт и ждёт следующей попытки.
@@ -233,9 +246,8 @@ impl Duplicator {
                 self.holding = true;
                 self.errors_in_row = 0;
                 self.read_pointer(&dup, &info);
-                // кадр, где сдвинулась только мышь, тоже годится: содержимое то же
                 match resource.and_then(|r| r.cast::<ID3D11Texture2D>().ok()) {
-                    Some(tex) => Ok(Frame::New(tex)),
+                    Some(tex) => Ok(Frame::New { tex, image: info.LastPresentTime != 0 }),
                     None => {
                         self.release();
                         Ok(Frame::Timeout)
@@ -276,7 +288,7 @@ impl Duplicator {
             return;
         }
         let more = if self.err_unlogged > 0 { format!(" (и ещё {} за полминуты)", self.err_unlogged) } else { String::new() };
-        crate::util::log(format!("захват: {}{more}", e.message().trim()));
+        crate::util::log(format!("захват: {}{more}", describe(e)));
         self.err_logged = Some(now);
         self.err_unlogged = 0;
     }

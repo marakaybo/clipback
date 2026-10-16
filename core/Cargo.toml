@@ -1,6 +1,6 @@
 [package]
 name = "clipback-core"
-version = "0.4.9"
+version = "0.5.0"
 edition = "2021"
 description = "Clipback: screen capture, replay buffer and clip saving"
 license = "GPL-3.0-or-later"
@@ -52,6 +52,15 @@ features = [
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_WindowsAndMessaging",
   "Win32_UI_Shell",
+  "Foundation",
+  "Graphics",
+  "Graphics_Capture",
+  "Graphics_DirectX",
+  "Graphics_DirectX_Direct3D11",
+  "Win32_System_WinRT",
+  "Win32_System_WinRT_Direct3D11",
+  "Win32_System_WinRT_Graphics",
+  "Win32_System_WinRT_Graphics_Capture",
 ]
 
 [profile.release]
