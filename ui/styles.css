@@ -209,6 +209,13 @@ html[data-mode="overlay"] .panel, html[data-mode="browser"] .panel { background:
 .meters { display: flex; flex-direction: column; gap: 5px; }
 .meter-line { display: flex; align-items: center; gap: 8px; font-size: var(--fs-xs); color: var(--text-3); }
 .meter-line span { width: 58px; text-align: right; flex: none; }
+.clip.picked { background: color-mix(in srgb, var(--accent) 16%, transparent); box-shadow: inset 2px 0 0 var(--accent); }
+.clip.picked.active { background: color-mix(in srgb, var(--accent) 24%, var(--s4)); }
+.pick-bar { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--line); flex: none; }
+.pick-bar[hidden] { display: none; }
+.pick-bar span { flex: 1; min-width: 0; font-size: var(--fs-sm); color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pick-bar .danger-btn { padding: 4px 10px; color: var(--rec); }
+.pick-bar .danger-btn:hover { background: color-mix(in srgb, var(--rec) 20%, transparent); }
 .clip-tools { display: flex; gap: 4px; padding: 0 10px 6px; align-items: center; }
 .clip-tools select { flex: 1; min-width: 0; }
 .fav-filter.active, .star-btn.on { color: var(--warn, #ffd43b); }
@@ -484,6 +491,8 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 12px;
 
 /* ---------- Уведомления ---------- */
 .toasts { position: fixed; top: 16px; right: 16px; display: flex; flex-direction: column; gap: 6px; z-index: 60; pointer-events: none; }
+.toast-action { margin-left: auto; flex: none; padding: 4px 10px; border-radius: var(--r); background: var(--s4); color: var(--text); font-weight: 600; font-size: var(--fs-sm); }
+.toast-action:hover { background: var(--accent); color: #0b1220; }
 .toast {
   display: flex; align-items: center; gap: 12px; width: 320px;
   padding: 10px 14px; border-radius: var(--r-panel);

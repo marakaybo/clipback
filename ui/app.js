@@ -113,6 +113,8 @@ function main() {
     monitors: [],
     // только что сохранённый повтор — выделим его при следующем обновлении списка
     pendingSelect: null,
+    // выбранные клипы (Ctrl/Shift-щелчок)
+    picked: new Set(),
     // включённые звуковые дорожки для сохранения отрезка: { номер: да/нет }
     trackOn: {},
     mics: null,
@@ -121,17 +123,29 @@ function main() {
   };
 
   // ---------- уведомления в окне ----------
-  function toast(title, sub = "", icon = "info") {
+  // action: { label, run, ms } — кнопка в уведомлении (например, «Вернуть»)
+  function toast(title, sub = "", icon = "info", action = null) {
     const t = document.createElement("div");
     t.className = "toast" + (icon === "error" ? " is-error" : "");
     t.innerHTML = `<div class="ticon">${svg(icon)}</div><div class="toast-text"><b></b><small></small></div>`;
     t.querySelector("b").textContent = title;
     t.querySelector("small").textContent = sub;
-    $("#toasts").append(t);
-    setTimeout(() => {
+    const close = () => {
       t.classList.add("out");
       setTimeout(() => t.remove(), 200);
-    }, icon === "error" ? 5000 : 2800);
+    };
+    if (action) {
+      const b = document.createElement("button");
+      b.className = "toast-action";
+      b.textContent = action.label;
+      b.onclick = () => {
+        close();
+        action.run();
+      };
+      t.append(b);
+    }
+    $("#toasts").append(t);
+    setTimeout(close, action ? action.ms || 9000 : icon === "error" ? 5000 : 2800);
   }
 
   async function call(cmd, args, errTitle) {
@@ -367,6 +381,7 @@ function main() {
 
   function renderClipList() {
     renderGameFilter();
+    renderPickBar();
     const box = $("#clip-list");
     box.innerHTML = "";
     const list = visible();
@@ -388,7 +403,7 @@ function main() {
         box.append(h);
       }
       const el = document.createElement("button");
-      el.className = "clip" + (S.clip && c.path === S.clip.path ? " active" : "");
+      el.className = "clip" + (S.clip && c.path === S.clip.path ? " active" : "") + (S.picked.has(c.path) ? " picked" : "");
       el.dataset.path = c.path;
       const th = document.createElement("div");
       th.className = "thumb";
@@ -425,16 +440,56 @@ function main() {
       // выбор по нажатию: если список перерисуется до отпускания кнопки, щелчок не потеряется
       el.onpointerdown = (e) => {
         if (e.button !== 0) return;
+        // Ctrl — добавить/убрать из выбранных, Shift — выбрать подряд, как в проводнике
+        if (e.ctrlKey || e.metaKey) return pickToggle(c);
+        if (e.shiftKey) return pickRange(c);
+        if (S.picked.size) pickClear();
+        pickAnchor = c.path; // от него считается выбор с Shift
         if (!(S.clip && S.clip.path === c.path)) selectClip(c);
         dragOut.arm(e, c, el.querySelector(".thumb canvas, .thumb img"));
       };
-      el.onclick = () => { if (!(S.clip && S.clip.path === c.path)) selectClip(c); };
+      el.onclick = (e) => { if (!e.ctrlKey && !e.shiftKey && !e.metaKey && !(S.clip && S.clip.path === c.path)) selectClip(c); };
       box.append(el);
       thumbObserver.observe(el);
     }
     const act = box.querySelector(".clip.active");
     if (act) act.scrollIntoView({ block: "nearest" });
   }
+
+  // ---------- выбор нескольких клипов ----------
+
+  let pickAnchor = null;
+  function pickToggle(c) {
+    // первый Ctrl-щелчок берёт в выбор и открытый клип
+    if (!S.picked.size && S.clip && S.clip.path !== c.path) S.picked.add(S.clip.path);
+    if (S.picked.has(c.path)) S.picked.delete(c.path);
+    else S.picked.add(c.path);
+    pickAnchor = c.path;
+    renderClipList();
+  }
+  function pickRange(c) {
+    const list = visible();
+    const from = list.findIndex((x) => x.path === (pickAnchor || (S.clip && S.clip.path)));
+    const to = list.findIndex((x) => x.path === c.path);
+    if (from < 0) return pickToggle(c);
+    S.picked = new Set(list.slice(Math.min(from, to), Math.max(from, to) + 1).map((x) => x.path));
+    renderClipList();
+  }
+  function pickClear() {
+    S.picked.clear();
+    pickAnchor = null;
+    renderClipList();
+  }
+  function renderPickBar() {
+    // выбранные, которые скрыл фильтр, не считаем и не удаляем
+    const shown = new Set(visible().map((c) => c.path));
+    for (const p of [...S.picked]) if (!shown.has(p)) S.picked.delete(p);
+    const sel = S.clips.filter((c) => S.picked.has(c.path));
+    $("#pick-bar").hidden = sel.length < 1;
+    $("#pick-info").textContent = `Выбрано: ${sel.length} · ${mb(sel.reduce((a, c) => a + c.size, 0))}`;
+  }
+  $("#pick-clear").onclick = pickClear;
+  $("#pick-delete").onclick = () => deleteClips(S.clips.filter((c) => S.picked.has(c.path)));
 
   // ---------- перетаскивание клипа в другие программы ----------
   // Если зажать клип и повести мышью — начинается системное перетаскивание файла:
@@ -1289,27 +1344,51 @@ function main() {
   // в корзину: по умолчанию спрашиваем, галочка «Больше не спрашивать» выключает вопрос
   // (вернуть его можно в настройках → Программа)
   async function deleteClip(c = S.clip) {
-    if (!c || S.busy) return;
+    if (c) return deleteClips([c]);
+  }
+
+  async function deleteClips(list) {
+    list = (list || []).filter(Boolean);
+    if (!list.length || S.busy) return;
+    const total = list.reduce((a, c) => a + c.size, 0);
     const s = S.state && S.state.settings;
     if (s && s.confirmDelete) {
-      const ok = await confirmBox("Отправить в корзину?", `«${clipTitle(c)}» — его можно будет вернуть из корзины Windows.`, "В корзину", "Больше не спрашивать");
+      const what = list.length === 1 ? `«${clipTitle(list[0])}»` : `${list.length} шт., ${mb(total)}`;
+      const ok = await confirmBox("Отправить в корзину?", `${what} — несколько секунд можно нажать «Вернуть», потом — из корзины Windows.`, "В корзину", "Больше не спрашивать");
       if (!ok) return;
       if (confirmBox.checked) saveSettings({ confirmDelete: false });
     }
-    const current = S.clip && S.clip.path === c.path;
-    const list = visible();
-    const idx = list.findIndex((x) => x.path === c.path);
-    const next = list[idx + 1] || list[idx - 1] || null;
+    const paths = new Set(list.map((c) => c.path));
+    const current = S.clip && paths.has(S.clip.path);
+    const shown = visible();
+    const idx = current ? shown.findIndex((x) => x.path === S.clip.path) : -1;
+    const next = current ? shown.slice(idx + 1).find((x) => !paths.has(x.path)) || shown.slice(0, idx).reverse().find((x) => !paths.has(x.path)) : null;
     if (current) releaseMedia();
-    thumbs.forget(c.path);
+    list.forEach((c) => thumbs.forget(c.path));
     try {
-      await api.call("delete_clip", { path: c.path });
-      toast("В корзине", `${clipTitle(c)} — можно восстановить из корзины Windows`, "trash");
+      const r = await api.call("delete_clips", { paths: [...paths] });
+      S.picked.clear();
       if (current) S.clip = null;
+      const title = r.count === 1 ? "В корзине" : `В корзине: ${r.count} шт.`;
+      const sub = r.count === 1 ? clipTitle(list[0]) : mb(r.bytes);
+      toast(title, sub, "trash", {
+        label: "Вернуть",
+        ms: 9000,
+        run: async () => {
+          try {
+            const back = await api.call("undo_delete", { batch: r.batch });
+            toast("Возвращено", back.length === 1 ? "Клип снова в списке" : `${back.length} шт. снова в списке`, "check");
+            await loadClips(back[0]);
+          } catch (e) {
+            toast("Не получилось вернуть", String(e), "error");
+          }
+        },
+      });
+      if (r.errors && r.errors.length) toast("Не всё удалилось", r.errors[0], "error");
       await loadClips(current ? next && next.path : S.clip && S.clip.path);
     } catch (e) {
       toast("Не удалось удалить", String(e), "error");
-      if (current) selectClip(c);
+      if (current && list.length === 1) selectClip(list[0]);
     }
   }
   $("#btn-delete").onclick = () => deleteClip();
@@ -1849,6 +1928,7 @@ function main() {
     }
     if (e.key === "Escape") {
       if ($("#settings").classList.contains("open")) return closeSettings();
+      if (S.picked.size) return pickClear();
       if (isFullView()) return setFullView(false);
       if (MODE === "overlay" || MODE === "browser") return call("hide_overlay_cmd");
       return;
@@ -1873,7 +1953,14 @@ function main() {
       case "KeyF": setFullView(!isFullView()); break;
       case "KeyE": editShot(); break;
       case "F2": e.preventDefault(); title.click(); break;
-      case "Delete": deleteClip(); break;
+      case "Delete": S.picked.size ? deleteClips(S.clips.filter((c) => S.picked.has(c.path))) : deleteClip(); break;
+      case "KeyA":
+        if (e.ctrlKey) {
+          e.preventDefault();
+          S.picked = new Set(visible().map((c) => c.path));
+          renderClipList();
+        }
+        break;
       case "KeyS":
         if (e.ctrlKey) { e.preventDefault(); exportClip(); }
         else saveFrame();

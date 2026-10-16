@@ -6,6 +6,7 @@ mod indicator;
 mod library;
 mod settings;
 mod sound;
+mod trash;
 mod update;
 mod winutil;
 
@@ -86,6 +87,7 @@ struct AppState {
     rec_item: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
     record_item: Mutex<Option<MenuItem<tauri::Wry>>>,
     favorites: Mutex<library::Favorites>,
+    trash: trash::Trash,
 }
 
 #[derive(Serialize, Clone)]
@@ -877,13 +879,55 @@ async fn rename_clip(app: AppHandle, path: String, name: String) -> Res<clips::C
 }
 
 #[tauri::command]
-async fn delete_clip(app: AppHandle, path: String) -> Res<()> {
-    let p = checked_path(&app, &path)?;
-    winutil::move_to_recycle_bin(&p).map_err(|e| format!("{e:#}"))?;
-    favs(&app).set(&p, false);
-    log(format!("в корзину: {}", p.display()));
+async fn delete_clip(app: AppHandle, path: String) -> Res<DeleteOut> {
+    delete_clips(app, vec![path]).await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteOut {
+    /// Номер пачки — для «Вернуть».
+    batch: u64,
+    count: usize,
+    bytes: u64,
+    errors: Vec<String>,
+}
+
+/// В корзину сразу несколько клипов. Несколько секунд их можно вернуть (undo_delete),
+/// потом они уходят в корзину Windows.
+#[tauri::command]
+async fn delete_clips(app: AppHandle, paths: Vec<String>) -> Res<DeleteOut> {
+    let ps: Vec<PathBuf> = paths.iter().map(|p| checked_path(&app, p)).collect::<Res<_>>()?;
+    let bytes = ps.iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
+    let (batch, done, errors) = st(&app).trash.stage(&ps);
+    for e in &errors {
+        log(format!("не удалось убрать: {e}"));
+    }
+    if done.is_empty() {
+        return Err(errors.first().cloned().unwrap_or_else(|| "нечего удалять".into()));
+    }
+    log(format!("в корзину ({} шт., можно вернуть {} с)", done.len(), trash::UNDO_SECS));
     clips_changed(&app);
-    Ok(())
+    let a = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(trash::UNDO_SECS));
+        for p in st(&a).trash.finalize(batch) {
+            favs(&a).set(&p, false);
+        }
+    });
+    Ok(DeleteOut { batch, count: done.len(), bytes, errors })
+}
+
+/// «Вернуть» — пока не истекло время.
+#[tauri::command]
+fn undo_delete(app: AppHandle, batch: u64) -> Res<Vec<String>> {
+    let back = st(&app).trash.restore(batch);
+    if back.is_empty() {
+        return Err("уже поздно — клипы в корзине Windows, их можно вернуть оттуда".into());
+    }
+    log(format!("возвращено из корзины: {} шт.", back.len()));
+    clips_changed(&app);
+    Ok(back.into_iter().map(|p| p.to_string_lossy().into_owned()).collect())
 }
 
 #[tauri::command]
@@ -1210,6 +1254,8 @@ pub fn run() {
             let settings_path = cfg_dir.join("settings.json");
             let settings = Settings::load(&settings_path);
             let _ = std::fs::create_dir_all(&settings.out_dir);
+            // клипы, которые не успели уйти в корзину в прошлый раз
+            trash::flush_leftovers(&settings.out_dir);
             let _ = app.asset_protocol_scope().allow_directory(&settings.out_dir, true);
             let record = settings.record_on_start;
             app.manage(AppState {
@@ -1222,6 +1268,7 @@ pub fn run() {
                 rec_item: Mutex::new(None),
             record_item: Mutex::new(None),
             favorites: Mutex::new(library::Favorites::load(cfg_dir.join("favorites.json"))),
+            trash: trash::Trash::default(),
             });
 
             create_windows(&handle, start_hidden)?;
@@ -1256,6 +1303,8 @@ pub fn run() {
             trim_clip,
             rename_clip,
             delete_clip,
+            delete_clips,
+            undo_delete,
             reveal_clip,
             open_clips_folder,
             copy_clip,
@@ -1283,8 +1332,9 @@ pub fn run() {
         .expect("не удалось запустить Clipback")
         .run(|app, e| {
             if let tauri::RunEvent::Exit = e {
-                // корректно останавливаем захват
+                // корректно останавливаем захват; то, что ждало «Вернуть», — в корзину
                 stop_for_exit(app);
+                st(app).trash.finalize_all();
                 log("выход");
             }
         });

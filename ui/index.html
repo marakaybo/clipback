@@ -89,6 +89,11 @@
           <button class="icon-btn sm fav-filter" id="fav-filter" title="Только избранное"><svg viewBox="0 0 24 24"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/></svg></button>
         </div>
         <div class="clip-list" id="clip-list"></div>
+        <div class="pick-bar" id="pick-bar" hidden>
+          <span id="pick-info"></span>
+          <button class="btn btn-ghost sm-btn danger-btn" id="pick-delete">В корзину</button>
+          <button class="icon-btn sm" id="pick-clear" title="Снять выделение (Esc)"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+        </div>
         <div class="storage">
           <div class="storage-row"><span id="storage-count">0 клипов</span><span id="storage-used">0 МБ</span></div>
         </div>
@@ -452,6 +457,7 @@
             <dt>Во весь экран</dt><dd>F</dd>
             <dt>В корзину</dt><dd>Delete</dd>
             <dt>Переименовать</dt><dd>F2</dd>
+            <dt>Выбрать несколько клипов</dt><dd>Ctrl / Shift + щелчок, Ctrl + A</dd>
             <dt>Закрыть оверлей</dt><dd>Esc</dd>
           </dl>
         </section>

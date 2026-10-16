@@ -85,6 +85,8 @@
   }, 2000);
 
   const find = (path) => clips.find((c) => c.path === path);
+  const trashBin = {};
+  let trashSeq = 0;
 
   const handlers = {
     get_state: () => state,
@@ -102,6 +104,21 @@
     },
     check_update: () => new Promise((r) => setTimeout(() => r({ version: "0.4.0", notes: "**Новое**\n- **Перетаскивание** клипа в Discord\n- Сжатие под лимит `Discord`\n  - 10, 20, 50 или 500 МБ\n\n**Исправлено**\n- Папка открывается поверх оверлея", portable: true }), 600)),
     take_whats_new: () => null,
+    delete_clips: ({ paths }) => {
+      const gone = clips.filter((c) => paths.includes(c.path));
+      const bytes = gone.reduce((a, c) => a + c.size, 0);
+      for (const c of gone) clips.splice(clips.indexOf(c), 1);
+      trashBin[++trashSeq] = gone;
+      emit("clips-changed");
+      return { batch: trashSeq, count: gone.length, bytes, errors: [] };
+    },
+    undo_delete: ({ batch }) => {
+      const back = trashBin[batch] || [];
+      delete trashBin[batch];
+      clips.push(...back);
+      emit("clips-changed");
+      return back.map((c) => c.path);
+    },
     audio_levels: () => [{ kind: "system", peak: Math.random() * 0.4, zeroSecs: 0, runningSecs: 100 }, { kind: "mic", peak: Math.random() * 0.25, zeroSecs: 0, runningSecs: 100 }],
     set_favorite: ({ path, on }) => { find(path).favorite = on; },
     clean_preview: ({ maxGb }) => ({ count: maxGb && maxGb < 5 ? 3 : 0, bytes: 2.1e9 }),
