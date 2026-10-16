@@ -107,6 +107,81 @@ pub fn copy_file_to_clipboard(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Картинка для буфера обмена: 24-битный DIB (снизу вверх, строки выровнены по 4 байта).
+/// Его понимают Discord, Telegram, браузеры, Paint и Office.
+pub fn dib_from_rgba(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {
+    let row = ((w * 3 + 3) & !3) as usize;
+    let mut out = Vec::with_capacity(40 + row * h as usize);
+    out.extend_from_slice(&40u32.to_le_bytes());
+    out.extend_from_slice(&(w as i32).to_le_bytes());
+    out.extend_from_slice(&(h as i32).to_le_bytes()); // положительная высота — строки снизу вверх
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&24u16.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes()); // BI_RGB
+    out.extend_from_slice(&((row * h as usize) as u32).to_le_bytes());
+    out.extend_from_slice(&[0u8; 16]);
+    for y in (0..h as usize).rev() {
+        let src = &rgba[y * w as usize * 4..(y + 1) * w as usize * 4];
+        let start = out.len();
+        for p in src.chunks_exact(4) {
+            out.extend_from_slice(&[p[2], p[1], p[0]]);
+        }
+        out.resize(start + row, 0);
+    }
+    out
+}
+
+/// Положить картинку в буфер обмена (Ctrl+V в чат вставит её как изображение).
+pub fn copy_image_to_clipboard(rgba: &[u8], w: u32, h: u32) -> Result<()> {
+    let dib = dib_from_rgba(rgba, w, h);
+    unsafe {
+        let mem = GlobalAlloc(GMEM_MOVEABLE, dib.len())?;
+        let ptr = GlobalLock(mem) as *mut u8;
+        if ptr.is_null() {
+            let _ = GlobalFree(Some(mem));
+            bail!("не удалось выделить память");
+        }
+        std::ptr::copy_nonoverlapping(dib.as_ptr(), ptr, dib.len());
+        let _ = GlobalUnlock(mem);
+        // буфер может быть на мгновение занят другой программой — несколько попыток
+        let mut opened = false;
+        for _ in 0..10 {
+            if OpenClipboard(None).is_ok() {
+                opened = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        if !opened {
+            let _ = GlobalFree(Some(mem));
+            bail!("буфер обмена занят другой программой");
+        }
+        let _ = EmptyClipboard();
+        const CF_DIB: u32 = 8;
+        let r = SetClipboardData(CF_DIB, Some(HANDLE(mem.0)));
+        let _ = CloseClipboard();
+        if r.is_err() {
+            let _ = GlobalFree(Some(mem));
+            bail!("не удалось положить картинку в буфер обмена");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod dib_tests {
+    #[test]
+    fn dib_rows_are_padded_and_bottom_up() {
+        // 2×2: верхняя строка красная, нижняя синяя
+        let rgba = [255, 0, 0, 255, 255, 0, 0, 255, 0, 0, 255, 255, 0, 0, 255, 255];
+        let d = super::dib_from_rgba(&rgba, 2, 2);
+        assert_eq!(d.len(), 40 + 8 * 2); // строка 6 байт → 8 с выравниванием
+        // первая строка в файле — нижняя (синяя), порядок BGR
+        assert_eq!(&d[40..43], &[255, 0, 0]);
+        assert_eq!(&d[48..51], &[0, 0, 255]);
+    }
+}
+
 /// Сделать окно «прозрачным для мыши», не забирающим фокус и без кнопки на панели задач.
 pub fn make_passive(hwnd: isize) {
     unsafe {

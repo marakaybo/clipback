@@ -26,6 +26,7 @@ anyhow = "1"
 base64 = "0.22"
 drag = "2"
 tauri-plugin-window-state = "2"
+png = "0.17"
 
 [dependencies.windows]
 version = "0.61"

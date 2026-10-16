@@ -610,6 +610,7 @@
       if (ctrl && e.code === "KeyZ" && !e.shiftKey) return e.preventDefault(), undo();
       if (ctrl && (e.code === "KeyY" || (e.code === "KeyZ" && e.shiftKey))) return e.preventDefault(), redo();
       if (ctrl && e.code === "KeyS") return e.preventDefault(), save(false);
+      if (ctrl && e.code === "KeyC") return e.preventDefault(), copyImage();
       if (e.key === "Escape") {
         if (E.tool === "crop") return setTool("move");
         if (E.sel >= 0) return (E.sel = -1), render();
@@ -648,6 +649,7 @@
     E.drag = null;
     E.cropDraft = null;
     E.onSave = opts.onSave;
+    E.onCopy = opts.onCopy;
     E.jpeg = !!opts.jpeg; // сохраняем в том же формате, что и исходник
     E.onClose = opts.onClose;
     rebuild();
@@ -685,6 +687,27 @@
       }, E.jpeg ? "image/jpeg" : "image/png", 0.92)
     );
   }
+
+  // картинка с правками — в буфер обмена, без сохранения файла
+  async function copyImage() {
+    if (E.text) commitText();
+    E.sel = -1;
+    rebuild();
+    render();
+    const c = crop();
+    const out = document.createElement("canvas");
+    out.width = c.w;
+    out.height = c.h;
+    out.getContext("2d").drawImage(E.full, c.x, c.y, c.w, c.h, 0, 0, c.w, c.h);
+    const png = await new Promise((res) => out.toBlob(res, "image/png"));
+    const b64 = await new Promise((res) => {
+      const r = new FileReader();
+      r.onload = () => res(String(r.result).split(",")[1]);
+      r.readAsDataURL(png);
+    });
+    if (E.onCopy) await E.onCopy(b64);
+  }
+  $("#ed-copy").onclick = copyImage;
 
   async function save(replaceOriginal) {
     if (!E.undo.length || !E.onSave) return;

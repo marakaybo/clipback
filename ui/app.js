@@ -1313,6 +1313,7 @@ function main() {
     window.ImageEditor.open(src, {
       title: clipTitle(c),
       jpeg: /\.jpe?g$/i.test(c.path),
+      onCopy: copyShotImage,
       onSave: async (png, replace) => {
         try {
           const e = await api.call("save_edited_image", { path: c.path, pngBase64: png, replace });
@@ -1327,7 +1328,36 @@ function main() {
     });
   }
   $("#btn-edit").onclick = editShot;
-  $("#btn-shot-copy").onclick = () => $("#btn-copy").click();
+  // «Копировать» у скриншота — сама картинка, чтобы Ctrl+V вставил её в любой чат
+  async function copyShotImage(b64) {
+    try {
+      await api.call("copy_image", { pngBase64: b64 });
+      toast("Скопировано", "Ctrl+V вставит картинку в чат", "copy");
+    } catch (e) {
+      toast("Не получилось скопировать", String(e), "error");
+    }
+  }
+  $("#btn-shot-copy").onclick = async () => {
+    const c = S.clip;
+    if (!c || c.kind !== "shot") return;
+    try {
+      const im = await new Promise((res, rej) => {
+        const i = new Image();
+        i.crossOrigin = "anonymous";
+        i.onload = () => res(i);
+        i.onerror = () => rej("картинка не загрузилась");
+        i.src = c.demo ? "" : api.fileUrl(c.path) + "?copy=" + c.modified;
+      });
+      const cv = document.createElement("canvas");
+      cv.width = im.naturalWidth;
+      cv.height = im.naturalHeight;
+      cv.getContext("2d").drawImage(im, 0, 0);
+      await copyShotImage(cv.toDataURL("image/png").split(",")[1]);
+    } catch (e) {
+      // не вышло картинкой — копируем файл, его тоже можно вставить в Discord
+      $("#btn-copy").click();
+    }
+  };
 
   // ---------- действия с клипом ----------
   $("#btn-copy").onclick = async () => {
@@ -1553,6 +1583,7 @@ function main() {
     $("#set-rec-indicator").checked = s.recordIndicator;
     $("#set-mic-agc").checked = s.micAgc;
     $("#set-confirm-delete").checked = s.confirmDelete;
+    $("#set-shot-clipboard").checked = s.screenshotClipboard;
     $("#set-rec-cursor").checked = s.recordCursor;
     $("#set-auto-clean").checked = s.autoClean;
     $("#set-clean-gb").value = String(s.cleanMaxGb);
@@ -1594,6 +1625,7 @@ function main() {
   $("#set-rec-indicator").addEventListener("change", (e) => saveSettings({ recordIndicator: e.target.checked }));
   $("#set-mic-agc").addEventListener("change", (e) => saveSettings({ micAgc: e.target.checked }));
   $("#set-confirm-delete").addEventListener("change", (e) => saveSettings({ confirmDelete: e.target.checked }));
+  $("#set-shot-clipboard").addEventListener("change", (e) => saveSettings({ screenshotClipboard: e.target.checked }));
   $("#set-rec-cursor").addEventListener("change", (e) => saveSettings({ recordCursor: e.target.checked }));
 
   // автоочистка: перед включением или ужесточением лимита — показать, что уйдёт в корзину

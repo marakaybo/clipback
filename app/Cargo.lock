@@ -515,6 +515,7 @@ dependencies = [
  "base64 0.22.1",
  "clipback-core",
  "drag",
+ "png 0.17.16",
  "serde",
  "serde_json",
  "tauri",

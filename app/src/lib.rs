@@ -427,6 +427,12 @@ fn take_screenshot(app: &AppHandle) -> Result<clips::ClipEntry, String> {
         (i.settings.out_dir.clone(), i.settings.screenshot_format != "png")
     };
     let raw = rx.recv_timeout(Duration::from_secs(5)).map_err(|_| "захват не ответил".to_string())??;
+    // сразу в буфер обмена — можно вставить в чат, не открывая Clipback
+    if lock(app).settings.screenshot_clipboard {
+        if let Err(e) = winutil::copy_image_to_clipboard(&raw.rgba, raw.width, raw.height) {
+            log(format!("скриншот в буфер: {e:#}"));
+        }
+    }
     let (data, _) = clipback_core::shot::encode(&raw, jpeg).map_err(|e| format!("{e:#}"))?;
     let e = clips::save_image(&dir, &label, &data).map_err(|e| format!("{e:#}"))?;
     log(format!("скриншот: {}", e.path));
@@ -703,7 +709,8 @@ fn on_hotkey(app: &AppHandle, sc: &Shortcut) {
             std::thread::spawn(move || match take_screenshot(&app) {
                 Ok(e) => {
                     cue(&app, sound::Cue::Saved);
-                    show_toast(&app, "Скриншот сохранён", &e.name, "camera")
+                    let sub = if lock(&app).settings.screenshot_clipboard { "И скопирован — Ctrl+V вставит его в чат" } else { e.name.as_str() };
+                    show_toast(&app, "Скриншот сохранён", sub, "camera")
                 }
                 Err(e) => show_toast(&app, "Скриншот не получился", &e, "error"),
             });
@@ -951,6 +958,26 @@ fn open_clips_folder(app: AppHandle, window: tauri::Window) -> Res<()> {
     std::fs::create_dir_all(&dir).map_err(err)?;
     std::process::Command::new("explorer").arg(&dir).spawn().map_err(err)?;
     Ok(())
+}
+
+/// Картинка (PNG от интерфейса) — в буфер обмена как изображение.
+#[tauri::command]
+async fn copy_image(png_base64: String) -> Res<()> {
+    let data = base64::engine::general_purpose::STANDARD.decode(png_base64.as_bytes()).map_err(err)?;
+    let mut dec = png::Decoder::new(std::io::Cursor::new(data));
+    dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut r = dec.read_info().map_err(err)?;
+    let mut buf = vec![0; r.output_buffer_size()];
+    let info = r.next_frame(&mut buf).map_err(err)?;
+    let px = &buf[..info.buffer_size()];
+    // в RGBA, какой бы ни была картинка
+    let rgba: Vec<u8> = match info.color_type {
+        png::ColorType::Rgba => px.to_vec(),
+        png::ColorType::Rgb => px.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
+        png::ColorType::GrayscaleAlpha => px.chunks_exact(2).flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
+        _ => px.iter().flat_map(|&g| [g, g, g, 255]).collect(),
+    };
+    winutil::copy_image_to_clipboard(&rgba, info.width, info.height).map_err(|e| format!("{e:#}"))
 }
 
 /// Перетаскивание клипа из Clipback в другую программу (Discord, Telegram, проводник).
@@ -1309,6 +1336,7 @@ pub fn run() {
             open_clips_folder,
             copy_clip,
             start_drag,
+            copy_image,
             set_favorite,
             clean_preview,
             save_frame,

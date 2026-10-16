@@ -241,6 +241,7 @@
             </div>
             <div class="row-btns" id="ed-save-bar">
               <button class="btn btn-ghost" id="ed-cancel">Закрыть</button>
+              <button class="btn btn-ghost" id="ed-copy" title="Скопировать картинку с правками — Ctrl+V вставит её в чат">Копировать</button>
               <button class="btn btn-ghost" id="ed-save-replace">Заменить оригинал</button>
               <button class="btn btn-accent" id="ed-save-copy">Сохранить копию</button>
             </div>
@@ -498,6 +499,10 @@
             </select>
           </div>
           <h3>Скриншоты</h3>
+          <div class="opt">
+            <div><b>Копировать скриншот в буфер</b><small>После Alt+F1 картинку можно сразу вставить в чат через Ctrl+V</small></div>
+            <label class="switch"><input type="checkbox" id="set-shot-clipboard"><span></span></label>
+          </div>
           <div class="opt">
             <div><b>Формат скриншотов</b><small id="shot-format-hint"></small></div>
             <div class="seg" id="set-shot-format">

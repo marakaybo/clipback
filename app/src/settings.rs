@@ -58,6 +58,8 @@ pub struct Settings {
     pub check_updates: bool,
     /// Формат скриншотов: "jpg" (легче) или "png" (без потерь).
     pub screenshot_format: String,
+    /// Скриншот сразу копируется в буфер обмена картинкой.
+    pub screenshot_clipboard: bool,
     /// Тихий щелчок при сохранении повтора, скриншота и начале/конце записи.
     pub save_sound: bool,
     /// Полупрозрачный значок в углу экрана, пока идёт запись.
@@ -100,6 +102,7 @@ impl Default for Settings {
             autostart: true,
             check_updates: true,
             screenshot_format: "jpg".into(),
+            screenshot_clipboard: true,
             save_sound: true,
             record_indicator: true,
             record_cursor: true,

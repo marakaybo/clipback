@@ -6,7 +6,7 @@ use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D, D3D11_TEXTURE2D_DESC};
 use windows::Win32::Graphics::Dxgi::{
     IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT,
-    DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_POINTER_SHAPE_INFO,
+    DXGI_ERROR_INVALID_CALL, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_POINTER_SHAPE_INFO,
 };
 use crate::cursor::{Pointer, PointerShape};
 
@@ -28,11 +28,26 @@ pub struct Duplicator {
     pub pointer: Pointer,
     /// Курсор сдвинулся или сменил форму с прошлого раза.
     pub pointer_changed: bool,
+    /// Ошибки подряд — пересоздаём захват только если они не проходят сами.
+    errors_in_row: u32,
+    /// Журнал: одинаковые ошибки пишем не чаще раза в 30 с, со счётчиком.
+    err_logged: Option<std::time::Instant>,
+    err_unlogged: u32,
 }
 
 impl Duplicator {
     pub fn new(device: &ID3D11Device, output: &IDXGIOutput1) -> Result<Self> {
-        let mut d = Self { device: device.clone(), output: output.clone(), dup: None, holding: false, pointer: Pointer::default(), pointer_changed: false };
+        let mut d = Self {
+            device: device.clone(),
+            output: output.clone(),
+            dup: None,
+            holding: false,
+            pointer: Pointer::default(),
+            pointer_changed: false,
+            errors_in_row: 0,
+            err_logged: None,
+            err_unlogged: 0,
+        };
         d.recreate().context("не удалось начать захват экрана")?;
         Ok(d)
     }
@@ -61,12 +76,13 @@ impl Duplicator {
             return Ok(Frame::Lost);
         }
         self.release();
-        let dup = self.dup.as_ref().unwrap();
+        let dup = self.dup.clone().unwrap();
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource: Option<IDXGIResource> = None;
         match unsafe { dup.AcquireNextFrame(timeout_ms, &mut info, &mut resource) } {
             Ok(()) => {
                 self.holding = true;
+                self.errors_in_row = 0;
                 let dup = dup.clone();
                 self.read_pointer(&dup, &info);
                 // кадр, где сдвинулась только мышь, тоже годится: содержимое то же
@@ -79,12 +95,35 @@ impl Duplicator {
                 Ok(Frame::Lost)
             }
             Err(e) => {
-                // прочие ошибки обычно временные — пересоздаём захват
-                crate::util::log(format!("захват: {e}"));
+                self.errors_in_row += 1;
+                self.log_error(&e);
+                if e.code() == DXGI_ERROR_INVALID_CALL && self.errors_in_row < 10 {
+                    // кадр мог остаться не отпущенным — отпускаем и пробуем снова, захват не трогаем
+                    unsafe {
+                        let _ = dup.ReleaseFrame();
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    return Ok(Frame::Timeout);
+                }
+                // ошибка не проходит — пересоздаём захват
+                self.errors_in_row = 0;
                 let _ = self.recreate();
                 Ok(Frame::Lost)
             }
         }
+    }
+
+    /// Ошибка в журнал — не чаще раза в 30 с, иначе он разрастается на тысячи строк.
+    fn log_error(&mut self, e: &windows::core::Error) {
+        let now = std::time::Instant::now();
+        if self.err_logged.is_some_and(|t| now.duration_since(t) < std::time::Duration::from_secs(30)) {
+            self.err_unlogged += 1;
+            return;
+        }
+        let more = if self.err_unlogged > 0 { format!(" (и ещё {} за полминуты)", self.err_unlogged) } else { String::new() };
+        crate::util::log(format!("захват: {}{more}", e.message().trim()));
+        self.err_logged = Some(now);
+        self.err_unlogged = 0;
     }
 
     fn read_pointer(&mut self, dup: &IDXGIOutputDuplication, info: &DXGI_OUTDUPL_FRAME_INFO) {
