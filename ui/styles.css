@@ -254,6 +254,10 @@ html[data-mode="overlay"] .panel, html[data-mode="browser"] .panel { background:
   display: grid; place-items: center; border-radius: 3px; background: rgba(0,0,0,.72);
 }
 .thumb .badge svg { width: 11px; height: 11px; }
+/* скрытая запись: превью в списке размыто, поверх — перечёркнутый глаз */
+.clip.is-hidden .thumb canvas, .clip.is-hidden .thumb img { filter: blur(9px) saturate(.5) brightness(.8); transform: scale(1.3); }
+.thumb .veiled-mark { position: absolute; inset: 0; display: grid; place-items: center; color: rgba(255,255,255,.85); }
+.thumb .veiled-mark svg { width: 18px; height: 18px; filter: drop-shadow(0 1px 2px rgba(0,0,0,.6)); }
 .clip-info { min-width: 0; display: flex; flex-direction: column; }
 .clip-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-2); }
 .clip:hover .clip-name, .clip.active .clip-name { color: var(--text); }
@@ -330,6 +334,17 @@ html[data-mode="overlay"] .panel, html[data-mode="browser"] .panel { background:
 .big-play svg { width: 24px; height: 24px; fill: currentColor; stroke: none; margin-left: 3px; }
 .big-play:hover { background: rgba(0,0,0,.75); }
 .stage.playing .big-play, .app.no-clip .big-play, .app.is-shot .big-play { opacity: 0; pointer-events: none; }
+/* скрытая запись в плеере: густое «мыло» и кнопка «Показать» */
+.veil { display: none; position: absolute; inset: 0; z-index: 3; place-content: center; justify-items: center; gap: 6px; padding: 24px; text-align: center; background: rgba(12,13,15,.35); color: var(--text-2); }
+.veil b { color: var(--text); font-size: var(--fs-lg); }
+.veil .btn { margin-top: 8px; }
+.veil-icon { width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; background: rgba(0,0,0,.45); color: #fff; margin-bottom: 4px; }
+.veil-icon svg { width: 22px; height: 22px; }
+.app.veiled .veil { display: grid; }
+.app.veiled .stage video, .app.veiled .stage img, .app.veiled .stage canvas { filter: blur(48px) saturate(.6) brightness(.75); transform: scale(1.15); }
+.app.veiled .big-play { opacity: 0; pointer-events: none; }
+.app.veiled .tslot canvas { filter: blur(8px) saturate(.5); transform: scale(1.4); }
+.hide-btn.on { color: var(--accent); }
 
 .controls { display: flex; align-items: center; gap: 2px; flex: none; }
 #btn-full { margin-left: 6px; }

@@ -1,6 +1,6 @@
 [package]
 name = "clipback-core"
-version = "0.4.4"
+version = "0.4.5"
 edition = "2021"
 description = "Clipback: screen capture, replay buffer and clip saving"
 license = "GPL-3.0-or-later"

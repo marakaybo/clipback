@@ -57,7 +57,7 @@
     mk(`Battlefield 6 ${stamp(now - 0.2 * H)}`, 0.2 * H, 300, 28, "video", { markers: [254] }),
     mk("Танк с двух выстрелов", 0.5 * H, 32, 28),
     mk(`Battlefield 6 ${stamp(now - 0.6 * H)}`, 0.6 * H, 300, 200),
-    mk(`Minecraft 1.21.1 ${stamp(now - 2.5 * H)}`, 2.5 * H, 180, 110),
+    mk(`Minecraft 1.21.1 ${stamp(now - 2.5 * H)}`, 2.5 * H, 180, 110, "video", { hidden: true }),
     mk(`Minecraft 1.21.1 ${stamp(now - 26 * H)}`, 26 * H, 300, 140),
     mk(`Battlefield 6 ${stamp(now - 27 * H)}`, 27 * H, 0, 35, "shot"),
   ];
@@ -124,6 +124,7 @@
     },
     audio_levels: () => [{ kind: "system", peak: Math.random() * 0.4, zeroSecs: 0, runningSecs: 100 }, { kind: "mic", peak: Math.random() * 0.25, zeroSecs: 0, runningSecs: 100 }],
     set_favorite: ({ path, on }) => { find(path).favorite = on; },
+    set_hidden: ({ path, on }) => { find(path).hidden = on; },
     clean_preview: ({ maxGb }) => ({ count: maxGb && maxGb < 5 ? 3 : 0, bytes: 2.1e9 }),
     install_update: () => new Promise((r) => {
       let done = 0;

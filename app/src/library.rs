@@ -1,6 +1,7 @@
 //! Избранное и автоочистка папки клипов.
 //!
 //! Избранное — список имён файлов в `favorites.json` рядом с настройками (сами клипы не меняются).
+//! Так же, отдельным списком в `hidden.json`, хранятся скрытые записи.
 //! Автоочистка выключена по умолчанию; когда включена — отправляет в корзину самые старые клипы,
 //! пока папка не уложится в лимит по размеру и возрасту. Избранное и свежие клипы она не трогает.
 
@@ -48,8 +49,14 @@ impl Favorites {
     }
 
     pub fn mark(&self, list: &mut [ClipEntry]) {
+        self.mark_with(list, |e| &mut e.favorite);
+    }
+
+    /// Проставить свою метку (`favorite`, `hidden`) клипам из списка.
+    pub fn mark_with(&self, list: &mut [ClipEntry], field: fn(&mut ClipEntry) -> &mut bool) {
         for e in list {
-            e.favorite = self.contains(Path::new(&e.path));
+            let on = self.contains(Path::new(&e.path));
+            *field(e) = on;
         }
     }
 }
@@ -127,5 +134,19 @@ mod tests {
         let f = Favorites::load(path);
         assert!(f.contains(Path::new(r"D:\другая\лучший момент.MP4")));
         assert!(!f.contains(Path::new(r"C:\clips\Игра 1.mp4")));
+    }
+
+    #[test]
+    fn hidden_list_marks_only_its_flag() {
+        let dir = std::env::temp_dir().join("clipback-hidden-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("hidden.json");
+        let _ = std::fs::remove_file(&path);
+        let mut h = Favorites::load(path);
+        let mut l = vec![clip("Секрет", 1.0, 10, true), clip("Обычный", 1.0, 10, false)];
+        h.set(Path::new(&l[0].path), true);
+        h.mark_with(&mut l, |e| &mut e.hidden);
+        assert!(l[0].hidden && !l[1].hidden);
+        assert!(l[0].favorite, "избранное не трогаем");
     }
 }

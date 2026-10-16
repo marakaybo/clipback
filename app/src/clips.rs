@@ -27,6 +27,8 @@ pub struct ClipEntry {
     pub broken: bool,
     /// Отмечен звёздочкой: виден в фильтре «Избранное», автоочистка его не трогает.
     pub favorite: bool,
+    /// Скрытая запись: в списке и плеере размыта, показывается только после подтверждения.
+    pub hidden: bool,
 }
 
 fn kind_of(p: &Path) -> Option<&'static str> {
@@ -93,6 +95,7 @@ pub fn entry(p: &Path) -> Result<ClipEntry> {
         audio_names: Vec::new(),
         broken: false,
         favorite: false,
+        hidden: false,
     };
     if kind == "video" {
         match mux::clip_info(p) {

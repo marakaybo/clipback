@@ -340,6 +340,68 @@ function main() {
   }
   $("#btn-fav").onclick = () => toggleFavorite(S.clip);
 
+  // ---------- скрытые записи ----------
+  // Превью скрытой записи размыто и в списке, и в плеере; показать её можно только
+  // после подтверждения — и только до перехода к другому клипу или закрытия окна.
+  const isVeiled = () => !!(S.clip && S.clip.hidden && S.unveiled !== S.clip.path);
+  function renderVeil() {
+    const c = S.clip;
+    const veiled = isVeiled();
+    $("#app").classList.toggle("veiled", veiled);
+    if (veiled && S.playing) setPlaying(false);
+    const on = !!(c && c.hidden);
+    $("#btn-hide").classList.toggle("on", on);
+    $("#btn-hide").title = on ? "Скрытая запись — снять метку" : "Скрыть запись — превью будет размыто";
+  }
+  async function revealClip() {
+    const c = S.clip;
+    if (!isVeiled()) return true;
+    const ok = await confirmBox(
+      "Показать скрытую запись?",
+      "Убедитесь, что экран никто не видит и не идёт трансляция или демонстрация экрана.",
+      "Показать"
+    );
+    if (!ok || S.clip !== c) return false;
+    S.unveiled = c.path;
+    renderVeil();
+    return true;
+  }
+  async function setHidden(cs, on) {
+    try {
+      for (const c of cs) {
+        await api.call("set_hidden", { path: c.path, on });
+        c.hidden = on;
+        if (S.clip && S.clip.path === c.path) S.clip.hidden = on;
+      }
+      if (on) S.unveiled = null;
+      renderClipList();
+      renderVeil();
+      if (on) toast(cs.length > 1 ? `Скрыто: ${cs.length}` : "Запись скрыта", "Превью размыто, открыть можно только с подтверждением", "check");
+    } catch (e) {
+      toast("Не получилось", String(e), "error");
+    }
+  }
+  $("#btn-hide").onclick = async () => {
+    const c = S.clip;
+    if (!c || c.demo && MODE !== "browser") return;
+    if (!c.hidden) return setHidden([c], true);
+    const ok = await confirmBox("Снять метку «скрытая»?", "Запись снова будет видна в списке и в плеере без размытия.", "Снять метку");
+    if (ok) setHidden([c], false);
+  };
+  $("#veil-show").onclick = () => revealClip();
+  $("#pick-hide").onclick = () => {
+    const sel = S.clips.filter((c) => S.picked.has(c.path));
+    const on = sel.some((c) => !c.hidden);
+    setHidden(sel, on);
+  };
+  // окно спрятали или свернули — скрытая запись снова под «мылом»
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden && S.unveiled) {
+      S.unveiled = null;
+      renderVeil();
+    }
+  });
+
   async function loadClips(selectPath) {
     const list = await call("list_clips", {}, "Не удалось прочитать папку клипов");
     S.clips = list;
@@ -403,7 +465,7 @@ function main() {
         box.append(h);
       }
       const el = document.createElement("button");
-      el.className = "clip" + (S.clip && c.path === S.clip.path ? " active" : "") + (S.picked.has(c.path) ? " picked" : "");
+      el.className = "clip" + (S.clip && c.path === S.clip.path ? " active" : "") + (S.picked.has(c.path) ? " picked" : "") + (c.hidden ? " is-hidden" : "");
       el.dataset.path = c.path;
       const th = document.createElement("div");
       th.className = "thumb";
@@ -411,6 +473,7 @@ function main() {
       else if (c.broken) th.insertAdjacentHTML("beforeend", `<span class="dur warn">ошибка</span>`);
       else th.insertAdjacentHTML("beforeend", `<span class="dur">${fmt(c.duration, 0)}</span>`);
       if (/\(отрезок\)/.test(c.name)) th.insertAdjacentHTML("beforeend", `<span class="badge" title="Отрезок">${svg("scissors")}</span>`);
+      if (c.hidden) th.insertAdjacentHTML("beforeend", `<span class="veiled-mark" title="Скрытая запись"><svg viewBox="0 0 24 24"><path d="M3 3l18 18"/><path d="M10.6 5.1A10 10 0 0 1 12 5c5 0 9 4.5 10 7a14 14 0 0 1-3.2 4.2M6.6 6.6A14 14 0 0 0 2 12c1 2.5 5 7 10 7a9.6 9.6 0 0 0 4.4-1.1"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg></span>`);
       const info = document.createElement("div");
       info.className = "clip-info";
       info.innerHTML = `<span class="clip-name"></span><span class="clip-sub"></span>`;
@@ -487,6 +550,7 @@ function main() {
     const sel = S.clips.filter((c) => S.picked.has(c.path));
     $("#pick-bar").hidden = sel.length < 1;
     $("#pick-info").textContent = `Выбрано: ${sel.length} · ${mb(sel.reduce((a, c) => a + c.size, 0))}`;
+    $("#pick-hide").textContent = sel.length && sel.every((c) => c.hidden) ? "Показывать" : "Скрыть";
   }
   $("#pick-clear").onclick = pickClear;
   $("#pick-delete").onclick = () => deleteClips(S.clips.filter((c) => S.picked.has(c.path)));
@@ -500,13 +564,15 @@ function main() {
       if (c.demo && MODE !== "browser") return;
       this.pending = { x: e.clientX, y: e.clientY, c, thumbEl };
     },
-    icon(el) {
+    icon(el, veil) {
       if (!el) return null;
       try {
         const cv = document.createElement("canvas");
         cv.width = 160;
         cv.height = 90;
-        cv.getContext("2d").drawImage(el, 0, 0, cv.width, cv.height);
+        const g = cv.getContext("2d");
+        if (veil) g.filter = "blur(10px) saturate(.5)"; // скрытая запись и в миниатюре перетаскивания размыта
+        g.drawImage(el, 0, 0, cv.width, cv.height);
         return cv.toDataURL("image/png").split(",")[1];
       } catch {
         return null; // картинка с другого источника — перетащим без миниатюры
@@ -524,7 +590,7 @@ function main() {
     dragOut.pending = null;
     setTimeout(() => document.body.classList.remove("grabbing"), 300);
     if (p.c.demo) return toast("Перетаскивание", "В программе клип можно бросить в Discord или папку", "copy");
-    api.call("start_drag", { path: p.c.path, iconPngBase64: dragOut.icon(p.thumbEl) }).catch((err) => toast("Не получилось перетащить", String(err), "error"));
+    api.call("start_drag", { path: p.c.path, iconPngBase64: dragOut.icon(p.thumbEl, p.c.hidden) }).catch((err) => toast("Не получилось перетащить", String(err), "error"));
   });
   addEventListener("pointerup", () => ((dragOut.pending = null), document.body.classList.remove("grabbing")));
 
@@ -664,7 +730,10 @@ function main() {
   function selectClip(c, fromReload = false) {
     const same = S.clip && c && S.clip.path === c.path && S.clip.modified === c.modified;
     S.clip = c;
+    // открытая скрытая запись снова прячется, как только выбрали другой клип
+    if (!c || S.unveiled !== c.path) S.unveiled = null;
     setPlaying(false);
+    renderVeil();
     $("#app").classList.toggle("no-clip", !c);
     $("#app").classList.toggle("is-shot", !!c && c.kind === "shot");
     $("#stage-msg").hidden = true;
@@ -734,6 +803,11 @@ function main() {
   function setPlaying(p) {
     const c = S.clip;
     if (!c || c.kind !== "video" || c.broken) p = false;
+    if (p && isVeiled()) {
+      // скрытую запись сначала надо открыть
+      revealClip().then((ok) => ok && setPlaying(true));
+      return;
+    }
     if (p && S.t >= S.outT - 0.05 && S.t <= S.outT + 0.05) seek(S.inT);
     if (p && S.t >= (c ? c.duration : 0) - 0.05) seek(S.inT);
     S.playing = p;
@@ -1269,6 +1343,7 @@ function main() {
   $("#btn-export").onclick = exportClip;
 
   async function saveFrame() {
+    if (isVeiled()) return revealClip();
     const c = S.clip;
     if (!c || c.kind !== "video" || c.broken) return;
     const label = clipTitle(c);
@@ -1283,7 +1358,7 @@ function main() {
         const jpeg = S.state && S.state.settings.screenshotFormat !== "png";
         png = cv.toDataURL(jpeg ? "image/jpeg" : "image/png", 0.92).split(",")[1];
       }
-      const e = await api.call("save_frame", { pngBase64: png, label });
+      const e = await api.call("save_frame", { pngBase64: png, label, from: S.clip && !S.clip.demo ? S.clip.path : null });
       toast("Кадр сохранён", `${fmt(S.t, 2)} · ${e.name}`, "camera");
     } catch (e) {
       toast("Не удалось сохранить кадр", String(e), "error");
@@ -1295,6 +1370,7 @@ function main() {
   async function editShot() {
     const c = S.clip;
     if (!c || c.kind !== "shot" || !window.ImageEditor) return;
+    if (!(await revealClip())) return;
     let src;
     try {
       if (c.demo) {

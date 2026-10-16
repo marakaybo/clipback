@@ -87,6 +87,8 @@ struct AppState {
     rec_item: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
     record_item: Mutex<Option<MenuItem<tauri::Wry>>>,
     favorites: Mutex<library::Favorites>,
+    /// Скрытые записи (тот же список имён, что и избранное, в `hidden.json`).
+    hidden: Mutex<library::Favorites>,
     trash: trash::Trash,
 }
 
@@ -769,11 +771,34 @@ async fn list_clips(app: AppHandle) -> Vec<clips::ClipEntry> {
     let dir = out_dir(&app);
     let mut l = clips::list(&dir);
     favs(&app).mark(&mut l);
+    hidden(&app).mark_with(&mut l, |e| &mut e.hidden);
     l
 }
 
 fn favs(app: &AppHandle) -> std::sync::MutexGuard<'_, library::Favorites> {
     st(app).favorites.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn hidden(app: &AppHandle) -> std::sync::MutexGuard<'_, library::Favorites> {
+    st(app).hidden.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Метка «скрытая запись»: превью размыто, открыть можно только после подтверждения.
+#[tauri::command]
+fn set_hidden(app: AppHandle, path: String, on: bool) -> Res<()> {
+    let p = checked_path(&app, &path)?;
+    hidden(&app).set(&p, on);
+    clips_changed(&app);
+    Ok(())
+}
+
+/// Новый файл из скрытой записи (отрезок, кадр, правка) тоже скрыт.
+fn inherit_hidden(app: &AppHandle, from: &Path, e: &mut clips::ClipEntry) {
+    let mut h = hidden(app);
+    if h.contains(from) {
+        h.set(Path::new(&e.path), true);
+        e.hidden = true;
+    }
 }
 
 #[tauri::command]
@@ -860,10 +885,11 @@ async fn trim_clip(
             let _ = progress_app.emit("export-progress", f);
         }
     };
-    let r = clips::trim(&p, start, end, replace, audio_keep.as_deref(), q.as_deref(), &mut progress).map_err(|e| {
+    let mut r = clips::trim(&p, start, end, replace, audio_keep.as_deref(), q.as_deref(), &mut progress).map_err(|e| {
         log(format!("не удалось сохранить отрезок: {e:#}"));
         format!("{e:#}")
     })?;
+    inherit_hidden(&app, &p, &mut r.clip);
     log(format!(
         "отрезок {:.2}–{:.2} с ({}, качество {}): {}",
         r.start,
@@ -881,6 +907,7 @@ async fn rename_clip(app: AppHandle, path: String, name: String) -> Res<clips::C
     let p = checked_path(&app, &path)?;
     let e = clips::rename(&p, &name).map_err(|e| format!("{e:#}"))?;
     favs(&app).renamed(&p, Path::new(&e.path));
+    hidden(&app).renamed(&p, Path::new(&e.path));
     clips_changed(&app);
     Ok(e)
 }
@@ -920,6 +947,7 @@ async fn delete_clips(app: AppHandle, paths: Vec<String>) -> Res<DeleteOut> {
         std::thread::sleep(Duration::from_secs(trash::UNDO_SECS));
         for p in st(&a).trash.finalize(batch) {
             favs(&a).set(&p, false);
+            hidden(&a).set(&p, false);
         }
     });
     Ok(DeleteOut { batch, count: done.len(), bytes, errors })
@@ -1039,10 +1067,13 @@ async fn copy_clip(app: AppHandle, path: String) -> Res<()> {
 
 /// PNG кадра из плеера (интерфейс рисует кадр в canvas и присылает base64).
 #[tauri::command]
-async fn save_frame(app: AppHandle, png_base64: String, label: Option<String>) -> Res<clips::ClipEntry> {
+async fn save_frame(app: AppHandle, png_base64: String, label: Option<String>, from: Option<String>) -> Res<clips::ClipEntry> {
     let data = base64::engine::general_purpose::STANDARD.decode(png_base64.as_bytes()).map_err(err)?;
     let label = label.and_then(|l| clips::clean_name(&l).ok()).unwrap_or_else(|| "Кадр".into());
-    let e = clips::save_image(&out_dir(&app), &label, &data).map_err(|e| format!("{e:#}"))?;
+    let mut e = clips::save_image(&out_dir(&app), &label, &data).map_err(|e| format!("{e:#}"))?;
+    if let Some(src) = from.and_then(|f| checked_path(&app, &f).ok()) {
+        inherit_hidden(&app, &src, &mut e);
+    }
     clips_changed(&app);
     Ok(e)
 }
@@ -1051,7 +1082,8 @@ async fn save_frame(app: AppHandle, png_base64: String, label: Option<String>) -
 async fn save_edited_image(app: AppHandle, path: String, png_base64: String, replace: bool) -> Res<clips::ClipEntry> {
     let p = checked_path(&app, &path)?;
     let data = base64::engine::general_purpose::STANDARD.decode(png_base64.as_bytes()).map_err(err)?;
-    let e = clips::save_edited(&p, &data, replace).map_err(|e| format!("{e:#}"))?;
+    let mut e = clips::save_edited(&p, &data, replace).map_err(|e| format!("{e:#}"))?;
+    inherit_hidden(&app, &p, &mut e);
     log(format!("скриншот отредактирован: {}", e.path));
     clips_changed(&app);
     Ok(e)
@@ -1313,6 +1345,7 @@ pub fn run() {
                 rec_item: Mutex::new(None),
             record_item: Mutex::new(None),
             favorites: Mutex::new(library::Favorites::load(cfg_dir.join("favorites.json"))),
+            hidden: Mutex::new(library::Favorites::load(cfg_dir.join("hidden.json"))),
             trash: trash::Trash::default(),
             });
 
@@ -1357,6 +1390,7 @@ pub fn run() {
             start_drag,
             copy_image,
             set_favorite,
+            set_hidden,
             clean_preview,
             save_frame,
             save_edited_image,
