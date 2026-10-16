@@ -10,7 +10,7 @@ use anyhow::Result;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -30,13 +30,15 @@ pub struct AudioConfig {
     pub mic_device: Option<String>,
     /// Усиление микрофона (1.0 — как есть).
     pub mic_gain: f32,
+    /// Автоусиление микрофона: тихий голос поднимается до нормальной громкости.
+    pub mic_agc: bool,
     /// Отдельные дорожки приложений (расширенный режим).
     pub apps: Vec<AppTrack>,
 }
 
 impl Default for AudioConfig {
     fn default() -> Self {
-        Self { system: true, mic: false, mic_device: None, mic_gain: 1.0, apps: Vec::new() }
+        Self { system: true, mic: false, mic_device: None, mic_gain: 1.0, mic_agc: true, apps: Vec::new() }
     }
 }
 
@@ -44,6 +46,52 @@ impl Default for AudioConfig {
 pub struct SourceDef {
     pub kind: SourceKind,
     pub gain: f32,
+    pub agc: bool,
+}
+
+/// Автоусиление голоса. Громкость микрофона в Windows часто занижена (её крутят Discord и
+/// фирменные программы микрофонов), и голос в записи едва слышен. Здесь уровень голоса
+/// подтягивается к нормальному, а тишина между фразами не раздувается в шум.
+pub struct Agc {
+    gain: f32,
+    env: f32,
+}
+
+impl Agc {
+    /// Куда тянем пики голоса.
+    const TARGET: f32 = 0.45;
+    /// Больше чем в 50 раз (+34 дБ) не усиливаем.
+    const MAX_GAIN: f32 = 50.0;
+    /// Тише этого — не голос, а шум: усиление не растёт.
+    const FLOOR: f32 = 0.0015;
+
+    pub fn new() -> Self {
+        Self { gain: 1.0, env: 0.0 }
+    }
+
+    /// Обработать стерео-сэмплы на месте.
+    pub fn process(&mut self, samples: &mut [f32]) {
+        let rate = (RATE * 2) as f32; // стерео
+        let env_release = (-1.0 / (0.25 * rate)).exp(); // огибающая гаснет за ~0,25 с
+        let up = 1.0 / (1.2 * rate); // усиление растёт плавно (~1,2 с)
+        let down = 1.0 / (0.01 * rate); // и быстро падает на громком (~10 мс)
+        for x in samples.iter_mut() {
+            let a = x.abs();
+            self.env = if a > self.env { a } else { self.env * env_release };
+            if self.env > Self::FLOOR {
+                let want = (Self::TARGET / self.env).clamp(1.0, Self::MAX_GAIN);
+                let k = if want < self.gain { down } else { up };
+                self.gain += (want - self.gain) * k.min(1.0);
+            }
+            *x = soft_clip(*x * self.gain);
+        }
+    }
+}
+
+impl Default for Agc {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Дорожка файла: название и какие источники в неё сводятся.
@@ -61,11 +109,11 @@ pub fn layout(cfg: &AudioConfig) -> Layout {
     let mut sources = Vec::new();
     let mut tracks = Vec::new();
     let sys = cfg.system.then(|| {
-        sources.push(SourceDef { kind: SourceKind::System, gain: 1.0 });
+        sources.push(SourceDef { kind: SourceKind::System, gain: 1.0, agc: false });
         sources.len() - 1
     });
     let mic = cfg.mic.then(|| {
-        sources.push(SourceDef { kind: SourceKind::Mic(cfg.mic_device.clone()), gain: cfg.mic_gain.clamp(0.1, 8.0) });
+        sources.push(SourceDef { kind: SourceKind::Mic(cfg.mic_device.clone()), gain: cfg.mic_gain.clamp(0.1, 8.0), agc: cfg.mic_agc });
         sources.len() - 1
     });
     if let (Some(s), Some(m)) = (sys, mic) {
@@ -81,7 +129,7 @@ pub fn layout(cfg: &AudioConfig) -> Layout {
         if a.exe.trim().is_empty() {
             continue;
         }
-        sources.push(SourceDef { kind: SourceKind::App(a.exe.clone()), gain: 1.0 });
+        sources.push(SourceDef { kind: SourceKind::App(a.exe.clone()), gain: 1.0, agc: false });
         let name = if a.name.trim().is_empty() { a.exe.clone() } else { a.name.trim().to_string() };
         tracks.push(TrackDef { name, sources: vec![sources.len() - 1] });
     }
@@ -259,7 +307,89 @@ fn render_track(t: &TrackDef, sources: &[SourceDef], parts: &[Vec<f32>]) -> Vec<
         .collect()
 }
 
+// ---------- что на самом деле слышит запись ----------
+// Индикатор устройства в Windows показывает сигнал микрофона, но до записи может доходить
+// тишина (шумоподавление, гейт, другая программа). Поэтому уровень меряем здесь — после захвата.
+
+/// Уровень источника звука, как его получает запись.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceLevel {
+    /// "system" | "mic" | "app"
+    pub kind: &'static str,
+    /// Пик за последние доли секунды (0…1, с учётом усиления).
+    pub peak: f32,
+    /// Сколько секунд подряд в запись идёт тишина — тише −70 дБ (0 — звук есть).
+    pub zero_secs: f64,
+    /// Сколько секунд источник пишется.
+    pub running_secs: f64,
+}
+
+struct LevelState {
+    kind: &'static str,
+    gain: f32,
+    peak: f32,
+    peak_at: Instant,
+    zero_since: Option<Instant>,
+    started: Instant,
+}
+
+static LEVELS: Mutex<Vec<LevelState>> = Mutex::new(Vec::new());
+
+/// Тише этого (−70 дБ) — в клипе не слышно: только шум микрофона, а не голос.
+const QUIET: f32 = 3e-4;
+
+/// Уровни источников текущей записи (пусто, если звук не пишется).
+pub fn levels() -> Vec<SourceLevel> {
+    let now = Instant::now();
+    let l = LEVELS.lock().unwrap_or_else(|e| e.into_inner());
+    l.iter()
+        .map(|s| {
+            // пик плавно гаснет, как у обычного индикатора
+            let age = now.duration_since(s.peak_at).as_secs_f32();
+            SourceLevel {
+                kind: s.kind,
+                peak: s.peak * (-age * 6.0).exp(),
+                zero_secs: s.zero_since.map_or(0.0, |t| now.duration_since(t).as_secs_f64()),
+                running_secs: now.duration_since(s.started).as_secs_f64(),
+            }
+        })
+        .collect()
+}
+
+fn note_level(i: usize, samples: &[f32], now: Instant) {
+    let mut l = LEVELS.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(s) = l.get_mut(i) else { return };
+    let peak = samples.iter().fold(0f32, |a, &b| a.max(b.abs())) * s.gain;
+    if peak > QUIET {
+        s.zero_since = None;
+    } else if s.zero_since.is_none() {
+        s.zero_since = Some(now);
+    }
+    let cur = s.peak * (-now.duration_since(s.peak_at).as_secs_f32() * 6.0).exp();
+    if peak >= cur {
+        s.peak = peak;
+        s.peak_at = now;
+    }
+}
+
+fn kind_name(k: &SourceKind) -> &'static str {
+    match k {
+        SourceKind::System => "system",
+        SourceKind::Mic(_) => "mic",
+        SourceKind::App(_) => "app",
+    }
+}
+
 fn mixer_loop(lay: Layout, mut encoders: Vec<AacEncoder>, t0: i64, out: Sender<(usize, AudioPacket)>, stop: Arc<AtomicBool>) {
+    {
+        let now = Instant::now();
+        *LEVELS.lock().unwrap_or_else(|e| e.into_inner()) = lay
+            .sources
+            .iter()
+            .map(|s| LevelState { kind: kind_name(&s.kind), gain: s.gain, peak: 0.0, peak_at: now, zero_since: Some(now), started: now })
+            .collect();
+    }
     let (tx, rx) = mpsc::channel::<Chunk>();
     let handles: Vec<_> = lay
         .sources
@@ -270,14 +400,24 @@ fn mixer_loop(lay: Layout, mut encoders: Vec<AacEncoder>, t0: i64, out: Sender<(
     drop(tx);
 
     let mut st = MixState::new(lay.sources.len(), Instant::now());
+    let mut agcs: Vec<Option<Agc>> = lay.sources.iter().map(|s| s.agc.then(Agc::new)).collect();
     let mut packets = Vec::new();
 
     while !stop.load(Ordering::Relaxed) {
         match rx.recv_timeout(Duration::from_millis(20)) {
             Ok(c) => {
-                st.push(c, Instant::now());
+                let now = Instant::now();
+                // автоусиление — до замера уровня: индикатор «в записи» показывает то, что попадёт в файл
+                let mut take = |mut c: Chunk| {
+                    if let Some(Some(a)) = agcs.get_mut(c.source) {
+                        a.process(&mut c.samples);
+                    }
+                    note_level(c.source, &c.samples, now);
+                    st.push(c, now);
+                };
+                take(c);
                 while let Ok(c) = rx.try_recv() {
-                    st.push(c, Instant::now());
+                    take(c);
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -300,6 +440,7 @@ fn mixer_loop(lay: Layout, mut encoders: Vec<AacEncoder>, t0: i64, out: Sender<(
     for h in handles {
         let _ = h.join();
     }
+    LEVELS.lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
 #[cfg(test)]

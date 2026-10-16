@@ -73,7 +73,7 @@ fn waits_for_all_sources_at_start() {
 
 #[test]
 fn mic_gain_applies_and_clips_softly() {
-    let sources = vec![SourceDef { kind: SourceKind::System, gain: 1.0 }, SourceDef { kind: SourceKind::Mic(None), gain: 4.0 }];
+    let sources = vec![SourceDef { kind: SourceKind::System, gain: 1.0, agc: false }, SourceDef { kind: SourceKind::Mic(None), gain: 4.0, agc: false }];
     let parts = vec![vec![0.1; 4], vec![0.1; 4]];
     let mic = render_track(&TrackDef { name: "м".into(), sources: vec![1] }, &sources, &parts);
     assert!((mic[0] - 0.4).abs() < 1e-6);
@@ -105,4 +105,28 @@ fn soft_clip_is_transparent_below_threshold() {
     assert_eq!(soft_clip(0.5), 0.5);
     assert_eq!(soft_clip(-0.9), -0.9);
     assert!(soft_clip(3.0) <= 1.0 && soft_clip(3.0) > 0.95);
+}
+
+#[test]
+fn agc_lifts_quiet_voice_but_not_silence() {
+    // «голос» на −50 дБ: после пары секунд должен стать громким
+    let mut agc = Agc::new();
+    let mut quiet: Vec<f32> = (0..RATE as usize * 2 * 3).map(|i| ((i as f32) * 0.05).sin() * 0.003).collect();
+    agc.process(&mut quiet);
+    let tail = &quiet[quiet.len() - 9600..];
+    let peak = tail.iter().fold(0f32, |a, &b| a.max(b.abs()));
+    assert!(peak > 0.12, "голос остался тихим: {peak}");
+
+    // шум микрофона на −100 дБ не раздувается
+    let mut agc = Agc::new();
+    let mut noise: Vec<f32> = (0..RATE as usize * 2 * 3).map(|i| ((i as f32) * 0.7).sin() * 0.00001).collect();
+    agc.process(&mut noise);
+    let peak = noise.iter().fold(0f32, |a, &b| a.max(b.abs()));
+    assert!(peak < 0.0001, "шум раздуло: {peak}");
+
+    // громкий голос не перегружается
+    let mut agc = Agc::new();
+    let mut loud: Vec<f32> = (0..RATE as usize * 2).map(|i| ((i as f32) * 0.05).sin() * 0.95).collect();
+    agc.process(&mut loud);
+    assert!(loud.iter().all(|x| x.abs() <= 1.0));
 }

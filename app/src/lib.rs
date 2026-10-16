@@ -1075,6 +1075,61 @@ async fn list_mics() -> Res<Vec<clipback_core::audio::Device>> {
     clipback_core::audio::list_mics().map_err(|e| format!("{e:#}"))
 }
 
+/// Что слышит сама запись — уровни источников после захвата.
+#[tauri::command]
+fn audio_levels() -> Vec<clipback_core::mixer::SourceLevel> {
+    clipback_core::mixer::levels()
+}
+
+/// Сторож микрофона: Windows несколько раз видела громкий сигнал (похоже на голос),
+/// а в запись пять минут подряд идёт тишина — значит, звук режет что-то по дороге.
+/// Фон шумоподавление убирает законно, поэтому порог высокий и ждём долго.
+/// Говорим об этом один раз за запуск записи и пишем в журнал.
+fn watch_mic(app: AppHandle) {
+    std::thread::spawn(move || {
+        let mut warned_gen = 0u64;
+        let mut heard = 0u32; // сколько раз Windows видела сигнал, пока в запись шли нули
+        let mut was_silent = false;
+        loop {
+            std::thread::sleep(Duration::from_secs(5));
+            let (recording, mic_on, device) = {
+                let i = lock(&app);
+                (i.recorder.is_some(), i.settings.mic, i.settings.mic_device.clone())
+            };
+            let Some(mic) = clipback_core::mixer::levels().into_iter().find(|l| l.kind == "mic") else {
+                heard = 0;
+                continue;
+            };
+            if !recording || !mic_on {
+                continue;
+            }
+            if mic.zero_secs < 20.0 {
+                if was_silent {
+                    log("микрофон: звук снова идёт в запись");
+                    was_silent = false;
+                }
+                heard = 0;
+                continue;
+            }
+            let peak = clipback_core::audio::list_mics()
+                .ok()
+                .and_then(|l| l.into_iter().find(|d| device.as_ref().map_or(d.is_default, |id| &d.id == id)))
+                .map_or(0.0, |d| d.peak);
+            if peak > 0.05 {
+                heard += 1;
+            }
+            let generation = st(&app).generation.load(Ordering::SeqCst);
+            if mic.zero_secs >= 300.0 && heard >= 3 && warned_gen != generation {
+                warned_gen = generation;
+                was_silent = true;
+                log(format!("микрофон: {:.0} с в запись идёт тишина, хотя Windows видит сигнал (пик {peak:.3})", mic.zero_secs));
+                show_toast(&app, "Микрофон не слышно в записи", "Windows видит звук, а Clipback получает тишину. Проверьте шумоподавление (fifine Genie, NVIDIA Broadcast) и громкость микрофона", "error");
+                let _ = app.emit("mic-silent", mic.zero_secs);
+            }
+        }
+    });
+}
+
 #[tauri::command]
 async fn pick_folder(app: AppHandle, window: tauri::Window) -> Option<String> {
     let start = out_dir(&app);
@@ -1171,6 +1226,7 @@ pub fn run() {
 
             create_windows(&handle, start_hidden)?;
             sync_autostart(&handle);
+            watch_mic(handle.clone());
             build_tray(&handle)?;
             register_hotkeys(&handle);
             if record {
@@ -1211,6 +1267,7 @@ pub fn run() {
             set_settings,
             list_monitors,
             list_mics,
+            audio_levels,
             list_audio_apps,
             audio_peaks,
             pick_folder,

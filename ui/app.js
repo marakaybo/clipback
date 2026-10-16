@@ -1449,6 +1449,7 @@ function main() {
     $("#set-check-updates").checked = s.checkUpdates;
     $("#set-save-sound").checked = s.saveSound;
     $("#set-rec-indicator").checked = s.recordIndicator;
+    $("#set-mic-agc").checked = s.micAgc;
     $("#set-rec-cursor").checked = s.recordCursor;
     $("#set-auto-clean").checked = s.autoClean;
     $("#set-clean-gb").value = String(s.cleanMaxGb);
@@ -1488,6 +1489,7 @@ function main() {
   $("#set-check-updates").addEventListener("change", (e) => saveSettings({ checkUpdates: e.target.checked }));
   $("#set-save-sound").addEventListener("change", (e) => saveSettings({ saveSound: e.target.checked }));
   $("#set-rec-indicator").addEventListener("change", (e) => saveSettings({ recordIndicator: e.target.checked }));
+  $("#set-mic-agc").addEventListener("change", (e) => saveSettings({ micAgc: e.target.checked }));
   $("#set-rec-cursor").addEventListener("change", (e) => saveSettings({ recordCursor: e.target.checked }));
 
   // автоочистка: перед включением или ужесточением лимита — показать, что уйдёт в корзину
@@ -1648,13 +1650,19 @@ function main() {
   function renderMicHint() {
     const s = S.state.settings;
     const m = currentMic();
-    let hint = "Скажите что-нибудь — полоска должна двигаться";
+    let hint = "Скажите что-нибудь — нижняя полоска показывает, что попадёт в запись. В паузах она может стоять: фон убирает шумоподавление";
+    let warn = false;
+    const lost = S.micLost >= 3; // Windows слышит, а в запись идут нули
     if (!s.mic) hint = "Микрофон выключен";
     else if (!S.state.recording) hint = "Включите запись буфера, чтобы видеть уровень";
-    else if (m && m.muted) hint = "Микрофон выключен в Windows (Параметры → Звук → Ввод)";
-    else if (m && m.volume < 0.5) hint = `Громкость микрофона в Windows всего ${Math.round(m.volume * 100)}% — если вас тихо слышно, поднимите её или усиление ниже`;
+    else if (m && m.muted) (hint = "Микрофон выключен в Windows (Параметры → Звук → Ввод)"), (warn = true);
+    else if (lost)
+      (hint = "Микрофон громко слышен, а в запись идёт тишина. Так работает шумоподавление (fifine Genie, NVIDIA Broadcast, улучшения звука Windows): если и голос пропадает — ослабьте его"),
+        (warn = true);
+    else if (m && m.volume < 0.5 && !s.micAgc)
+      (hint = `Громкость микрофона в Windows всего ${Math.round(m.volume * 100)}% — если вас тихо слышно, поднимите её или усиление ниже`), (warn = true);
     $("#mic-hint").textContent = hint;
-    $("#mic-hint").classList.toggle("warn-text", !!m && s.mic && (m.muted || m.volume < 0.5));
+    $("#mic-hint").classList.toggle("warn-text", warn && s.mic);
   }
 
   // индикатор уровня: опрашиваем, пока открыта вкладка «Звук»
@@ -1663,17 +1671,28 @@ function main() {
     const on = $("#settings").classList.contains("open") && $(".tab.active") && $(".tab.active").dataset.tab === "audio";
     if (on && !meterTimer) {
       meterTimer = setInterval(async () => {
+        let levels = [];
         try {
-          S.mics = await api.call("list_mics");
+          [S.mics, levels] = await Promise.all([api.call("list_mics"), api.call("audio_levels")]);
         } catch {
           return;
         }
         const m = currentMic();
         const s = S.state.settings;
-        const peak = m && s.mic && S.state.recording ? Math.min(1, m.peak * s.micGain) : 0;
-        const db = peak > 0 ? 20 * Math.log10(peak) : -90;
-        $("#mic-meter").style.width = `${clamp(((db + 60) / 60) * 100, 0, 100)}%`;
-        $("#mic-meter").classList.toggle("hot", db > -3);
+        const live = s.mic && S.state.recording;
+        const show = (el, peak) => {
+          const db = peak > 0 ? 20 * Math.log10(peak) : -90;
+          el.style.width = `${clamp(((db + 60) / 60) * 100, 0, 100)}%`;
+          el.classList.toggle("hot", db > -3);
+        };
+        const win = m && live ? Math.min(1, m.peak * s.micGain) : 0;
+        const recMic = (levels || []).find((l) => l.kind === "mic");
+        const rec = recMic && live ? Math.min(1, recMic.peak) : 0;
+        show($("#mic-meter"), win);
+        show($("#mic-meter-rec"), rec);
+        // расхождение копим, чтобы не мигать подсказкой от одного кадра
+        if (live && win > 0.05 && recMic && recMic.zeroSecs > 1) S.micLost = (S.micLost || 0) + 1;
+        else if (rec > 0) S.micLost = 0;
         renderMicHint();
       }, 120);
     } else if (!on && meterTimer) {

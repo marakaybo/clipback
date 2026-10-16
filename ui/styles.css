@@ -206,6 +206,9 @@ html[data-mode="overlay"] .panel, html[data-mode="browser"] .panel { background:
 .size-own { display: flex; align-items: center; gap: 4px; color: var(--text-3); font-size: var(--fs-sm); }
 .size-own input { width: 58px; }
 .hint.warn { color: var(--warn); }
+.meters { display: flex; flex-direction: column; gap: 5px; }
+.meter-line { display: flex; align-items: center; gap: 8px; font-size: var(--fs-xs); color: var(--text-3); }
+.meter-line span { width: 58px; text-align: right; flex: none; }
 .clip-tools { display: flex; gap: 4px; padding: 0 10px 6px; align-items: center; }
 .clip-tools select { flex: 1; min-width: 0; }
 .fav-filter.active, .star-btn.on { color: var(--warn, #ffd43b); }

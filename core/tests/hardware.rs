@@ -171,3 +171,29 @@ fn transcode_and_peaks_on_real_clip() {
     assert_eq!(mux::clip_info(&dst).unwrap().audio_tracks, 1);
 }
 
+
+/// Что запись реально получает с микрофона: CLIPBACK_TEST_SECS секунд (по умолчанию 6), раз в секунду.
+#[test]
+#[ignore]
+fn mic_levels_in_mixer() {
+    use clipback_core::mixer::{self, AudioConfig};
+    let secs: u64 = std::env::var("CLIPBACK_TEST_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
+    unsafe {
+        use windows::Win32::Media::MediaFoundation::{MFStartup, MFSTARTUP_FULL, MF_VERSION};
+        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        MFStartup(MF_VERSION, MFSTARTUP_FULL).unwrap();
+    }
+    let cfg = AudioConfig { system: true, mic: true, ..AudioConfig::default() };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let hub = mixer::start(&cfg, clipback_core::audio::qpc_now(), tx).unwrap().expect("нет дорожек");
+    for _ in 0..secs {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        for l in mixer::levels() {
+            print!("{}: пик {:.4}, нули {:.1} с   ", l.kind, l.peak, l.zero_secs);
+        }
+        println!();
+    }
+    drop(hub);
+    let packets = rx.try_iter().count();
+    assert!(packets > 0, "кодировщик ничего не выдал");
+}

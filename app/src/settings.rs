@@ -44,6 +44,8 @@ pub struct Settings {
     pub mic_device: Option<String>,
     /// Усиление микрофона (1.0 — как есть).
     pub mic_gain: f32,
+    /// Автоусиление голоса (не зависит от громкости микрофона в Windows).
+    pub mic_agc: bool,
     /// "simple" — звук системы и микрофон; "advanced" — плюс дорожки приложений.
     pub audio_mode: String,
     pub app_tracks: Vec<AppTrack>,
@@ -88,6 +90,7 @@ impl Default for Settings {
             mic: false,
             mic_device: None,
             mic_gain: 1.0,
+            mic_agc: true,
             audio_mode: "simple".into(),
             app_tracks: Vec::new(),
             record_on_start: true,
@@ -204,6 +207,7 @@ impl Settings {
             || self.mic_device != other.mic_device
             || (self.quality == "custom" && self.custom_bitrate != other.custom_bitrate)
             || self.mic_gain != other.mic_gain
+            || self.mic_agc != other.mic_agc
             || self.audio_mode != other.audio_mode
             || self.app_tracks != other.app_tracks
             || self.record_cursor != other.record_cursor
@@ -225,6 +229,7 @@ impl Settings {
             mic: self.mic,
             mic_device: self.mic_device.clone(),
             mic_gain: self.mic_gain,
+            mic_agc: self.mic_agc,
             apps,
         }
     }

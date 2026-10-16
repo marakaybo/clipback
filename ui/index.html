@@ -404,7 +404,14 @@
           </div>
           <div class="opt mic-row">
             <div><b>Уровень</b><small id="mic-hint"></small></div>
-            <div class="meter"><div class="meter-fill" id="mic-meter"></div></div>
+            <div class="meters">
+              <div class="meter-line"><span>Микрофон</span><div class="meter"><div class="meter-fill" id="mic-meter"></div></div></div>
+              <div class="meter-line"><span>В записи</span><div class="meter"><div class="meter-fill rec" id="mic-meter-rec"></div></div></div>
+            </div>
+          </div>
+          <div class="opt mic-row">
+            <div><b>Автоусиление голоса</b><small>Тихий голос в записи поднимается до нормальной громкости, тишина между фразами не шумит. Не зависит от громкости микрофона в Windows</small></div>
+            <label class="switch"><input type="checkbox" id="set-mic-agc"><span></span></label>
           </div>
           <div class="opt mic-row">
             <div><b>Усиление микрофона</b><small>Если вас тихо слышно в клипах</small></div>
