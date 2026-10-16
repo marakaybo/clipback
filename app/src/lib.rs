@@ -1146,6 +1146,18 @@ async fn list_mics() -> Res<Vec<clipback_core::audio::Device>> {
     clipback_core::audio::list_mics().map_err(|e| format!("{e:#}"))
 }
 
+/// Windows запретила приложениям микрофон (тогда в запись идёт тишина).
+#[tauri::command]
+fn mic_blocked() -> bool {
+    winutil::mic_blocked_by_privacy()
+}
+
+/// Открыть страницу Windows «Конфиденциальность → Микрофон».
+#[tauri::command]
+fn open_mic_privacy() -> Res<()> {
+    std::process::Command::new("explorer.exe").arg("ms-settings:privacy-microphone").spawn().map(|_| ()).map_err(err)
+}
+
 /// Что слышит сама запись — уровни источников после захвата.
 #[tauri::command]
 fn audio_levels() -> Vec<clipback_core::mixer::SourceLevel> {
@@ -1161,12 +1173,18 @@ fn watch_mic(app: AppHandle) {
         let mut warned_gen = 0u64;
         let mut heard = 0u32; // сколько раз Windows видела сигнал, пока в запись шли нули
         let mut was_silent = false;
+        let mut privacy_warned = false;
         loop {
             std::thread::sleep(Duration::from_secs(5));
             let (recording, mic_on, device) = {
                 let i = lock(&app);
                 (i.recorder.is_some(), i.settings.mic, i.settings.mic_device.clone())
             };
+            if recording && mic_on && !privacy_warned && winutil::mic_blocked_by_privacy() {
+                privacy_warned = true;
+                log("микрофон: Windows запретила приложениям доступ к микрофону — в запись идёт тишина");
+                show_toast(&app, "Windows не даёт микрофон", "Параметры → Конфиденциальность → Микрофон: включите доступ для классических приложений", "error");
+            }
             let Some(mic) = clipback_core::mixer::levels().into_iter().find(|l| l.kind == "mic") else {
                 heard = 0;
                 continue;
@@ -1194,7 +1212,7 @@ fn watch_mic(app: AppHandle) {
                 warned_gen = generation;
                 was_silent = true;
                 log(format!("микрофон: {:.0} с в запись идёт тишина, хотя Windows видит сигнал (пик {peak:.3})", mic.zero_secs));
-                show_toast(&app, "Микрофон не слышно в записи", "Windows видит звук, а Clipback получает тишину. Проверьте шумоподавление (fifine Genie, NVIDIA Broadcast) и громкость микрофона", "error");
+                show_toast(&app, "Микрофон не слышно в записи", "Windows видит звук, а в запись идёт тишина. Откройте «Настройки → Звук» — там подсказка", "error");
                 let _ = app.emit("mic-silent", mic.zero_secs);
             }
         }
@@ -1301,6 +1319,7 @@ pub fn run() {
             create_windows(&handle, start_hidden)?;
             sync_autostart(&handle);
             watch_mic(handle.clone());
+            winutil::install_drag_cursors();
             build_tray(&handle)?;
             register_hotkeys(&handle);
             if record {
@@ -1344,6 +1363,8 @@ pub fn run() {
             set_settings,
             list_monitors,
             list_mics,
+            mic_blocked,
+            open_mic_privacy,
             audio_levels,
             list_audio_apps,
             audio_peaks,

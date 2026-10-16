@@ -107,6 +107,95 @@ pub fn copy_file_to_clipboard(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Запретила ли Windows приложениям микрофон («Параметры → Конфиденциальность → Микрофон»).
+/// Тогда запись получает только тишину, без всякой ошибки — сказать об этом можем только мы.
+pub fn mic_blocked_by_privacy() -> bool {
+    use windows::Win32::System::Registry::{RegGetValueW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
+    const KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone";
+    let read = |root: HKEY, path: &str| -> Option<String> {
+        let p: Vec<u16> = path.encode_utf16().chain([0]).collect();
+        let v: Vec<u16> = "Value".encode_utf16().chain([0]).collect();
+        let mut buf = [0u16; 32];
+        let mut len = (buf.len() * 2) as u32;
+        unsafe { RegGetValueW(root, PCWSTR(p.as_ptr()), PCWSTR(v.as_ptr()), RRF_RT_REG_SZ, None, Some(buf.as_mut_ptr() as *mut _), Some(&mut len)) }
+            .ok()
+            .ok()?;
+        Some(String::from_utf16_lossy(&buf[..(len as usize / 2).saturating_sub(1)]))
+    };
+    // весь микрофон выключен (HKLM / HKCU) или только для классических приложений (NonPackaged)
+    [(HKEY_LOCAL_MACHINE, KEY.to_string()), (HKEY_CURRENT_USER, KEY.to_string()), (HKEY_CURRENT_USER, format!(r"{KEY}\NonPackaged"))]
+        .iter()
+        .any(|(root, path)| read(*root, path).as_deref() == Some("Deny"))
+}
+
+/// Курсор из PNG (прямая альфа) с горячей точкой в долях размера.
+fn cursor_from_png(png_bytes: &[u8], hot: (f32, f32)) -> Result<isize> {
+    use windows::Win32::Graphics::Gdi::{CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS};
+    use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, ICONINFO};
+    let mut dec = png::Decoder::new(std::io::Cursor::new(png_bytes));
+    dec.set_transformations(png::Transformations::EXPAND);
+    let mut r = dec.read_info()?;
+    let mut buf = vec![0; r.output_buffer_size()];
+    let info = r.next_frame(&mut buf)?;
+    if info.color_type != png::ColorType::Rgba {
+        bail!("курсор: нужен RGBA");
+    }
+    let (w, h) = (info.width as i32, info.height as i32);
+    unsafe {
+        let bi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h, // сверху вниз
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits = std::ptr::null_mut();
+        let color = CreateDIBSection(None, &bi, DIB_RGB_COLORS, &mut bits, None, 0)?;
+        let dst = std::slice::from_raw_parts_mut(bits as *mut u8, (w * h * 4) as usize);
+        for (d, s) in dst.chunks_exact_mut(4).zip(buf.chunks_exact(4)) {
+            d.copy_from_slice(&[s[2], s[1], s[0], s[3]]);
+        }
+        let mask = CreateBitmap(w, h, 1, 1, None);
+        let ii = ICONINFO {
+            fIcon: false.into(),
+            xHotspot: (w as f32 * hot.0) as u32,
+            yHotspot: (h as f32 * hot.1) as u32,
+            hbmMask: mask,
+            hbmColor: color,
+        };
+        let cur = CreateIconIndirect(&ii);
+        let _ = DeleteObject(color.into());
+        let _ = DeleteObject(mask.into());
+        Ok(cur?.0 as isize)
+    }
+}
+
+/// Курсор-«кулак» на время перетаскивания клипа (и он же с запретом — где бросить нельзя).
+/// Размер — под масштаб экрана.
+pub fn install_drag_cursors() {
+    use windows::Win32::UI::HiDpi::GetDpiForSystem;
+    let dpi = unsafe { GetDpiForSystem() }.max(96);
+    let size = 32 * dpi / 96;
+    let (ok, no): (&[u8], &[u8]) = if size >= 56 {
+        (include_bytes!("../icons/cursors/grab-64.png"), include_bytes!("../icons/cursors/grab-64-no.png"))
+    } else if size >= 40 {
+        (include_bytes!("../icons/cursors/grab-48.png"), include_bytes!("../icons/cursors/grab-48-no.png"))
+    } else {
+        (include_bytes!("../icons/cursors/grab-32.png"), include_bytes!("../icons/cursors/grab-32-no.png"))
+    };
+    // горячая точка — середина кулака (16, 17 из 32)
+    let hot = (0.5, 17.0 / 32.0);
+    match (cursor_from_png(ok, hot), cursor_from_png(no, hot)) {
+        (Ok(a), Ok(b)) => drag::set_feedback_cursors(a, b),
+        (Err(e), _) | (_, Err(e)) => crate::log(format!("курсор перетаскивания: {e:#}")),
+    }
+}
+
 /// Картинка для буфера обмена: 24-битный DIB (снизу вверх, строки выровнены по 4 байта).
 /// Его понимают Discord, Telegram, браузеры, Paint и Office.
 pub fn dib_from_rgba(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {
@@ -170,6 +259,18 @@ pub fn copy_image_to_clipboard(rgba: &[u8], w: u32, h: u32) -> Result<()> {
 
 #[cfg(test)]
 mod dib_tests {
+    #[test]
+    fn mic_privacy_reads_registry() {
+        // на машине разработки доступ разрешён; главное — чтение не падает
+        println!("микрофон запрещён: {}", super::mic_blocked_by_privacy());
+    }
+
+    #[test]
+    fn drag_cursors_decode() {
+        let png = include_bytes!("../icons/cursors/grab-48-no.png");
+        assert!(super::cursor_from_png(png, (0.5, 0.5)).unwrap() != 0);
+    }
+
     #[test]
     fn dib_rows_are_padded_and_bottom_up() {
         // 2×2: верхняя строка красная, нижняя синяя

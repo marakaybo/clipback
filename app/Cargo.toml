@@ -1,6 +1,6 @@
 [package]
 name = "clipback"
-version = "0.4.3"
+version = "0.4.4"
 edition = "2021"
 description = "Clipback — запись последних минут экрана"
 license = "GPL-3.0-or-later"
@@ -45,7 +45,12 @@ features = [
   "Win32_System_LibraryLoader",
   "Win32_UI_HiDpi",
   "Win32_Storage_FileSystem",
+  "Win32_System_Registry",
 ]
+
+# drag с правкой: свой курсор-«кулак» во время перетаскивания (vendor/drag, GiveFeedback)
+[patch.crates-io]
+drag = { path = "vendor/drag" }
 
 [profile.release]
 lto = true

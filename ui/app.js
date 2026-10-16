@@ -516,13 +516,17 @@ function main() {
   addEventListener("pointermove", (e) => {
     const p = dragOut.pending;
     if (!p) return;
-    if (!(e.buttons & 1)) return (dragOut.pending = null);
-    if (Math.hypot(e.clientX - p.x, e.clientY - p.y) < 8) return;
+    if (!(e.buttons & 1)) return (dragOut.pending = null), document.body.classList.remove("grabbing");
+    const dist = Math.hypot(e.clientX - p.x, e.clientY - p.y);
+    // клип «взяли» — рука сжимается, дальше её подхватит курсор Windows-перетаскивания
+    if (dist >= 3) document.body.classList.add("grabbing");
+    if (dist < 8) return;
     dragOut.pending = null;
+    setTimeout(() => document.body.classList.remove("grabbing"), 300);
     if (p.c.demo) return toast("Перетаскивание", "В программе клип можно бросить в Discord или папку", "copy");
     api.call("start_drag", { path: p.c.path, iconPngBase64: dragOut.icon(p.thumbEl) }).catch((err) => toast("Не получилось перетащить", String(err), "error"));
   });
-  addEventListener("pointerup", () => (dragOut.pending = null));
+  addEventListener("pointerup", () => ((dragOut.pending = null), document.body.classList.remove("grabbing")));
 
   function fillListThumb(el) {
     const c = S.clips.find((x) => x.path === el.dataset.path);
@@ -1773,6 +1777,7 @@ function main() {
   $("#set-mic-gain").addEventListener("change", (e) => saveSettings({ micGain: e.target.value / 100 }));
 
   function refreshMics() {
+    api.call("mic_blocked").then((b) => { S.micBlocked = !!b; renderMicHint(); }).catch(() => {});
     return api.call("list_mics").then((m) => { S.mics = m; fillSettings(); }).catch(() => {});
   }
 
@@ -1789,16 +1794,22 @@ function main() {
     let hint = "Скажите что-нибудь — нижняя полоска показывает, что попадёт в запись. В паузах она может стоять: фон убирает шумоподавление";
     let warn = false;
     const lost = S.micLost >= 3; // Windows слышит, а в запись идут нули
+    let fix = false;
     if (!s.mic) hint = "Микрофон выключен";
+    else if (S.micBlocked)
+      (hint = "Windows запретила приложениям микрофон — в запись идёт тишина. Нажмите, чтобы открыть настройки, и включите «Разрешить классическим приложениям доступ к микрофону»"),
+        (warn = true), (fix = true);
     else if (!S.state.recording) hint = "Включите запись буфера, чтобы видеть уровень";
     else if (m && m.muted) (hint = "Микрофон выключен в Windows (Параметры → Звук → Ввод)"), (warn = true);
     else if (lost)
-      (hint = "Микрофон громко слышен, а в запись идёт тишина. Так работает шумоподавление (fifine Genie, NVIDIA Broadcast, улучшения звука Windows): если и голос пропадает — ослабьте его"),
+      (hint = "Микрофон слышен в Windows, а в запись идёт тишина. Выберите микрофон заново; если не поможет — проверьте шумоподавление (fifine Genie, NVIDIA Broadcast)"),
         (warn = true);
     else if (m && m.volume < 0.5 && !s.micAgc)
       (hint = `Громкость микрофона в Windows всего ${Math.round(m.volume * 100)}% — если вас тихо слышно, поднимите её или усиление ниже`), (warn = true);
     $("#mic-hint").textContent = hint;
     $("#mic-hint").classList.toggle("warn-text", warn && s.mic);
+    $("#mic-hint").classList.toggle("link-text", fix && s.mic);
+    $("#mic-hint").onclick = fix && s.mic ? () => api.call("open_mic_privacy").catch(() => {}) : null;
   }
 
   // индикатор уровня: опрашиваем, пока открыта вкладка «Звук»

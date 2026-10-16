@@ -105,6 +105,8 @@
     check_update: () => new Promise((r) => setTimeout(() => r({ version: "0.4.0", notes: "**Новое**\n- **Перетаскивание** клипа в Discord\n- Сжатие под лимит `Discord`\n  - 10, 20, 50 или 500 МБ\n\n**Исправлено**\n- Папка открывается поверх оверлея", portable: true }), 600)),
     take_whats_new: () => null,
     copy_image: () => {},
+    mic_blocked: () => false,
+    open_mic_privacy: () => {},
     delete_clips: ({ paths }) => {
       const gone = clips.filter((c) => paths.includes(c.path));
       const bytes = gone.reduce((a, c) => a + c.size, 0);

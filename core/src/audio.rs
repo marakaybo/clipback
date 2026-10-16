@@ -180,26 +180,37 @@ fn frame_to_stereo(fmt: Fmt, data: &[u8], ch: usize) -> (f32, f32) {
 }
 
 /// Линейный пересчёт частоты в 48 кГц (с сохранением состояния между кусками).
+/// `corr` — поправка на уход часов устройства: +0,001 — выдать на 0,1 % меньше кадров.
 pub struct Resampler {
     from: u32,
     phase: f64,
     prev: (f32, f32),
+    corr: f64,
 }
 
 impl Resampler {
     pub fn new(from: u32) -> Self {
-        Self { from, phase: 0.0, prev: (0.0, 0.0) }
+        Self { from, phase: 0.0, prev: (0.0, 0.0), corr: 0.0 }
+    }
+
+    pub fn set_correction(&mut self, corr: f64) {
+        self.corr = corr;
     }
 
     pub fn process(&mut self, input: &[(f32, f32)], out: &mut Vec<f32>) {
-        if self.from == RATE {
+        if self.from == RATE && self.corr == 0.0 {
             for &(l, r) in input {
                 out.push(l);
                 out.push(r);
             }
+            // следующий выходной отсчёт — первый кадр следующего куска
+            self.phase = 1.0;
+            if let Some(&last) = input.last() {
+                self.prev = last;
+            }
             return;
         }
-        let step = self.from as f64 / RATE as f64;
+        let step = self.from as f64 / RATE as f64 * (1.0 + self.corr);
         // phase — позиция следующего выходного отсчёта относительно prev (0 = prev, 1 = input[0])
         let mut t = self.phase;
         let at = |i: isize, prev: (f32, f32)| if i < 0 { prev } else { input[i as usize] };
@@ -219,16 +230,112 @@ impl Resampler {
     }
 }
 
-/// Сколько тишины вставить/сколько отбросить, чтобы кусок встал на своё место на шкале.
-/// Возвращает (тишина в кадрах, сколько кадров отбросить с начала).
-pub fn align(next_pos: i64, start_pos: i64, tolerance: i64) -> (i64, i64) {
-    let d = start_pos - next_pos;
-    if d > tolerance {
-        (d, 0)
-    } else if d < -tolerance {
-        (0, -d)
-    } else {
-        (0, 0)
+/// Расстановка кусков одного источника на общей шкале.
+///
+/// Метки времени устройства дрожат, а его часы чуть спешат или отстают от системных
+/// (у USB-микрофонов это обычно десятки–сотни ppm). Поэтому кусок, пришедший «почти
+/// вовремя», ставится вплотную к предыдущему — как в OBS, — а накопившийся уход часов
+/// плавно убирается пересчётом частоты (`correction`). Вставляем тишину или выбрасываем
+/// звук только при настоящем разрыве: устройство замолкало или поток надолго задержался.
+///
+/// Раньше допуск был 10 мс, а при выбрасывании счётчик ещё и сдвигался вперёд: стоило
+/// часам микрофона уйти на 10 мс (у fifine — через 69 с), и дальше выбрасывалось всё.
+#[derive(Default)]
+pub struct Placer {
+    /// Позиция, с которой встанет следующий кадр.
+    next: Option<i64>,
+    /// Сглаженное расхождение «наш счёт − метки устройства», кадры (>0 — мы впереди).
+    err: f64,
+    correcting: bool,
+}
+
+impl Placer {
+    /// Расхождение меньше этого — дрожание и уход часов, а не разрыв.
+    pub const SMOOTH: i64 = RATE as i64 / 20; // 50 мс
+    /// Выравнивать часы начинаем с 8 мс расхождения и заканчиваем на 1 мс.
+    const CORRECT_ON: f64 = RATE as f64 * 0.008;
+    const CORRECT_OFF: f64 = RATE as f64 * 0.001;
+    /// Не больше 0,2 % — на слух незаметно (≈3 цента).
+    const MAX_CORR: f64 = 0.002;
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Поправка частоты для ресемплера (расхождение убирается примерно за 20 с).
+    pub fn correction(&self) -> f64 {
+        if self.correcting {
+            (self.err / (20.0 * RATE as f64)).clamp(-Self::MAX_CORR, Self::MAX_CORR)
+        } else {
+            0.0
+        }
+    }
+
+    /// Кусок (48 кГц, стерео), первый кадр которого по меткам устройства — на `start`.
+    /// В `out` — что отправить: (позиция, звук).
+    pub fn place(&mut self, start: i64, samples: Vec<f32>, out: &mut Vec<(i64, Vec<f32>)>) {
+        let n = samples.len() as i64 / 2;
+        let next = *self.next.get_or_insert(start);
+        let d = start - next;
+        // где на шкале стоит нулевой кадр куска
+        let base = if d > Self::SMOOTH {
+            // разрыв: устройство молчало — заполняем тишиной
+            out.push((next, vec![0.0; d as usize * 2]));
+            self.next = Some(start);
+            self.reset_clock();
+            start
+        } else if d < -Self::SMOOTH {
+            // звук «из прошлого» (это место уже заполнено): лишнее выбросим
+            self.reset_clock();
+            start
+        } else {
+            self.track_clock(-d as f64);
+            next
+        };
+        let cur = self.next.unwrap_or(base);
+        let first = cur.max(0); // до начала записи ничего не пишем
+        let lead = first - base;
+        let end = base + n;
+        if end > first {
+            let mut s = samples;
+            if lead > 0 {
+                s.drain(..lead as usize * 2);
+            }
+            out.push((first, s));
+        }
+        self.next = Some(cur.max(end));
+    }
+
+    /// Устройство давно ничего не присылает — дописать тишину до `target`.
+    pub fn fill_to(&mut self, target: i64) -> Option<(i64, Vec<f32>)> {
+        match self.next {
+            None => {
+                if target >= 0 {
+                    self.next = Some(target);
+                }
+                None
+            }
+            Some(from) if target - from > RATE as i64 / 10 => {
+                self.next = Some(target);
+                Some((from, vec![0.0; (target - from) as usize * 2]))
+            }
+            _ => None,
+        }
+    }
+
+    fn track_clock(&mut self, err: f64) {
+        self.err += (err - self.err) * 0.05;
+        let a = self.err.abs();
+        if a > Self::CORRECT_ON {
+            self.correcting = true;
+        } else if a < Self::CORRECT_OFF {
+            self.correcting = false;
+        }
+    }
+
+    fn reset_clock(&mut self) {
+        self.err = 0.0;
+        self.correcting = false;
     }
 }
 
@@ -242,10 +349,10 @@ pub fn spawn_source(index: usize, kind: SourceKind, t0: i64, out: Sender<Chunk>,
             unsafe {
                 let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
             }
-            let mut next_pos: Option<i64> = None;
+            let mut placer = Placer::new();
             let mut last_err = String::new();
             while !stop.load(Ordering::Relaxed) {
-                match run_source(index, &kind, t0, &out, &stop, &mut next_pos) {
+                match run_source(index, &kind, t0, &out, &stop, &mut placer) {
                     Ok(()) => last_err.clear(),
                     Err(e) => {
                         // одну и ту же ошибку пишем в журнал один раз
@@ -257,7 +364,7 @@ pub fn spawn_source(index: usize, kind: SourceKind, t0: i64, out: Sender<Chunk>,
                         let deadline = Instant::now() + Duration::from_millis(1500);
                         while Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
                             std::thread::sleep(Duration::from_millis(50));
-                            fill_silence(index, t0, &out, &mut next_pos);
+                            fill_silence(index, t0, &out, &mut placer, 0);
                         }
                     }
                 }
@@ -280,7 +387,7 @@ impl SourceKind {
 
 /// Микрофон молчит дольше — переоткрываем поток.
 const MIC_STALL: Duration = Duration::from_secs(2);
-const MIC_SILENT: Duration = Duration::from_secs(20);
+const MIC_SILENT: Duration = Duration::from_secs(60);
 /// Тише этого — не звук, а «цифровой ноль» или шум (−70 дБ).
 const MIC_QUIET: f32 = 3e-4;
 
@@ -290,7 +397,7 @@ fn note_reopen(stalled: bool) {
     let mut l = LAST.lock().unwrap_or_else(|e| e.into_inner());
     if l.is_none_or(|t| t.elapsed() > Duration::from_secs(600)) {
         *l = Some(Instant::now());
-        crate::util::log(if stalled { "микрофон перестал присылать звук — переоткрываю" } else { "микрофон 20 с в тишине — переоткрываю на всякий случай" });
+        crate::util::log(if stalled { "микрофон перестал присылать звук — переоткрываю" } else { "микрофон минуту в тишине — переоткрываю на всякий случай" });
     }
 }
 
@@ -298,17 +405,13 @@ fn pos_of(qpc: i64, t0: i64) -> i64 {
     ((qpc - t0) as i128 * RATE as i128 / 10_000_000) as i64
 }
 
-/// Если данных давно не было (в loopback тишина приходит «ничем»), дописываем нули до «сейчас − 50 мс».
-fn fill_silence(index: usize, t0: i64, out: &Sender<Chunk>, next_pos: &mut Option<i64>) {
-    let now = pos_of(qpc_now(), t0);
-    let target = now - RATE as i64 / 20;
-    let from = next_pos.unwrap_or(target.max(0));
-    if target - from > RATE as i64 / 10 {
-        let n = (target - from) as usize;
-        let _ = out.send(Chunk { source: index, pos: from, samples: vec![0.0; n * 2] });
-        *next_pos = Some(target);
-    } else if next_pos.is_none() && target >= 0 {
-        *next_pos = Some(target);
+/// Если данных давно не было (в loopback тишина приходит «ничем»), дописываем нули
+/// до «сейчас − 50 мс − обычная задержка устройства»: настоящий звук, который ещё в пути,
+/// не должен оказаться «в прошлом».
+fn fill_silence(index: usize, t0: i64, out: &Sender<Chunk>, placer: &mut Placer, lag: i64) {
+    let target = pos_of(qpc_now(), t0) - RATE as i64 / 20 - lag;
+    if let Some((pos, samples)) = placer.fill_to(target) {
+        let _ = out.send(Chunk { source: index, pos, samples });
     }
 }
 
@@ -447,6 +550,10 @@ unsafe fn activate_app(pid: u32) -> Result<IAudioClient> {
 
 // ---------- общий цикл чтения ----------
 
+/// Запас буфера устройства: 1 с. Задержку он не добавляет, зато если поток записи
+/// на мгновение придушила игра, звук дождётся нас, а не пропадёт.
+const BUFFER_100NS: i64 = 10_000_000;
+
 struct Opened {
     client: IAudioClient,
     fmt: Fmt,
@@ -477,7 +584,7 @@ unsafe fn open(kind: &SourceKind, en: &IMMDeviceEnumerator) -> Result<Opened> {
             .Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
                 AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
-                2_000_000,
+                BUFFER_100NS,
                 0,
                 &wf,
                 None,
@@ -501,7 +608,7 @@ unsafe fn open(kind: &SourceKind, en: &IMMDeviceEnumerator) -> Result<Opened> {
     let mix = client.GetMixFormat()?;
     let parsed = read_format(mix);
     let flags = if flow == eRender { AUDCLNT_STREAMFLAGS_LOOPBACK } else { 0 };
-    let init = client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 2_000_000, 0, mix, None);
+    let init = client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, BUFFER_100NS, 0, mix, None);
     CoTaskMemFree(Some(mix as *const _));
     let (fmt, rate, ch, block) = parsed?;
     init.context("устройство не открылось — возможно, его занимает другая программа")?;
@@ -509,7 +616,18 @@ unsafe fn open(kind: &SourceKind, en: &IMMDeviceEnumerator) -> Result<Opened> {
     Ok(Opened { client, fmt, rate, ch, block, dev_id, event: None, pid: 0 })
 }
 
-fn run_source(index: usize, kind: &SourceKind, t0: i64, out: &Sender<Chunk>, stop: &AtomicBool, next_pos: &mut Option<i64>) -> Result<()> {
+/// Метка времени первого кадра куска (100 нс, QPC). Бывает, что её нет (захват приложения)
+/// или драйвер присылает ерунду — тогда считаем от момента, когда кусок до нас дошёл.
+pub fn sane_time(qpc: i64, frames: u32, rate: u32, now: i64) -> i64 {
+    let est = now - frames as i64 * 10_000_000 / rate.max(1) as i64;
+    if qpc <= 0 || qpc > now + 500_000 || qpc < now - 30_000_000 {
+        est
+    } else {
+        qpc
+    }
+}
+
+fn run_source(index: usize, kind: &SourceKind, t0: i64, out: &Sender<Chunk>, stop: &AtomicBool, placer: &mut Placer) -> Result<()> {
     use windows::Win32::System::Threading::WaitForSingleObject;
     unsafe {
         let en: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
@@ -530,7 +648,9 @@ fn run_source(index: usize, kind: &SourceKind, t0: i64, out: &Sender<Chunk>, sto
         let opened_at = Instant::now();
         let mut last_packet = Instant::now();
         let mut last_sound = Instant::now();
-        let tol = RATE as i64 / 100; // 10 мс
+        // обычная задержка: насколько конец куска отстаёт от «сейчас», кадры 48 кГц
+        let mut lag: Option<i64> = None;
+        let mut placed = Vec::new();
 
         let r = (|| -> Result<()> {
             while !stop.load(Ordering::Relaxed) {
@@ -562,31 +682,24 @@ fn run_source(index: usize, kind: &SourceKind, t0: i64, out: &Sender<Chunk>, sto
                     }
 
                     let mut samples = Vec::with_capacity(frames as usize * 2 + 8);
+                    rs.set_correction(placer.correction());
                     rs.process(&frames_buf, &mut samples);
-                    // захват приложения не всегда сообщает время — тогда считаем от «сейчас»
-                    let qpc = if qpc == 0 { qpc_now() - frames as i64 * 10_000_000 / o.rate as i64 } else { qpc as i64 };
-                    let start = pos_of(qpc, t0);
-                    let np = next_pos.get_or_insert(start);
-                    let (silence, mut drop) = align(*np, start, tol);
-                    if silence > 0 {
-                        let _ = out.send(Chunk { source: index, pos: *np, samples: vec![0.0; silence as usize * 2] });
-                        *np += silence;
-                    }
-                    // до начала записи и «наложившиеся» кадры выбрасываем
-                    if *np < 0 {
-                        drop = drop.max(-*np);
-                    }
-                    let drop_s = (drop as usize * 2).min(samples.len());
-                    let samples = samples.split_off(drop_s);
-                    *np += drop_s as i64 / 2;
-                    if !samples.is_empty() {
-                        let len = samples.len() as i64 / 2;
-                        let _ = out.send(Chunk { source: index, pos: *np, samples });
-                        *np += len;
+                    let now = qpc_now();
+                    let qpc = sane_time(qpc as i64, frames, o.rate, now);
+                    let end = pos_of(qpc + frames as i64 * 10_000_000 / o.rate as i64, t0);
+                    let now_lag = pos_of(now, t0) - end;
+                    lag = Some(lag.map_or(now_lag, |l| l + (now_lag - l) / 20));
+                    placed.clear();
+                    placer.place(pos_of(qpc, t0), samples, &mut placed);
+                    for (pos, samples) in placed.drain(..) {
+                        let _ = out.send(Chunk { source: index, pos, samples });
                     }
                 }
+                // тишину дописываем, только если устройство и правда давно молчит
+                if !got && last_packet.elapsed() > Duration::from_millis(250) {
+                    fill_silence(index, t0, out, placer, lag.unwrap_or(0).clamp(0, RATE as i64 / 2));
+                }
                 if !got {
-                    fill_silence(index, t0, out, next_pos);
                     match o.event {
                         Some(ev) => {
                             WaitForSingleObject(ev, 10);
