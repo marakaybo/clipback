@@ -43,6 +43,9 @@ fn old_exe(exe: &Path) -> PathBuf {
 
 /// После обновления portable: дождаться выхода старой копии и убрать её файл.
 pub fn finish_previous(args: &[String]) {
+    if install_over(args) {
+        std::process::exit(0);
+    }
     if let Some(pid) = args.iter().position(|a| a == "--after-update").and_then(|i| args.get(i + 1)).and_then(|s| s.parse::<u32>().ok()) {
         wait_process(pid);
     }
@@ -114,7 +117,14 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
     // запись надо остановить до замены файлов
     crate::stop_for_exit(&app);
     if is_portable() {
-        replace_self(&bytes).map_err(|e| format!("не удалось заменить программу: {e}"))?;
+        if let Err(e) = replace_self(&bytes) {
+            // нет прав на папку (Program Files, защищённая папка, OneDrive) — ставим через
+            // временный файл с правами администратора: Windows спросит разрешения
+            crate::log(format!("обновление: заменить на месте не вышло ({e}), пробую с правами администратора"));
+            replace_elevated(&bytes)?;
+            app.exit(0);
+            return Ok(());
+        }
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         crate::log(format!("обновление до {}: перезапуск", update.version));
         std::process::Command::new(exe)
@@ -132,13 +142,67 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
 
 /// Запущенный exe нельзя перезаписать, но можно переименовать: старый уходит в .old,
 /// новый встаёт на его место. При ошибке всё возвращается как было.
+/// Новая версия запускается из временной папки с правами администратора и сама встаёт на место.
+fn replace_elevated(bytes: &[u8]) -> Result<(), String> {
+    use windows::core::{HSTRING, PCWSTR};
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
+    let target = std::env::current_exe().map_err(|e| e.to_string())?;
+    let tmp = std::env::temp_dir().join("clipback-update.exe");
+    std::fs::write(&tmp, bytes).map_err(|e| format!("не удалось сохранить обновление: {e}"))?;
+    let params = format!("--install-over \"{}\" {}", target.display(), std::process::id());
+    let r = unsafe {
+        ShellExecuteW(None, &HSTRING::from("runas"), &HSTRING::from(tmp.as_os_str()), &HSTRING::from(params), PCWSTR::null(), SW_HIDE)
+    };
+    if r.0 as isize <= 32 {
+        return Err("обновление отменено: Windows не дала прав на папку с программой. Перенесите Clipback, например, в Документы, или скачайте новую версию с GitHub".into());
+    }
+    Ok(())
+}
+
+/// `--install-over <путь> <pid>`: дождаться выхода старой копии, встать на её место
+/// и запустить программу снова — уже с обычными правами (через проводник).
+fn install_over(args: &[String]) -> bool {
+    let Some(i) = args.iter().position(|a| a == "--install-over") else { return false };
+    let (Some(target), Some(pid)) = (args.get(i + 1), args.get(i + 2).and_then(|p| p.parse::<u32>().ok())) else { return true };
+    wait_process(pid);
+    let target = PathBuf::from(target);
+    let ok = std::env::current_exe().ok().is_some_and(|me| {
+        let old = old_exe(&target);
+        let _ = std::fs::remove_file(&old);
+        let _ = std::fs::rename(&target, &old);
+        (0..10).any(|_| {
+            let r = std::fs::copy(&me, &target).is_ok();
+            if !r {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+            r
+        })
+    });
+    if !ok {
+        // не получилось — возвращаем старую версию на место
+        let _ = std::fs::rename(old_exe(&target), &target);
+    }
+    let _ = std::process::Command::new("explorer.exe").arg(&target).spawn();
+    true
+}
+
 fn replace_self(bytes: &[u8]) -> std::io::Result<()> {
     let exe = std::env::current_exe()?;
     let new = exe.with_extension("exe.new");
     let old = old_exe(&exe);
     std::fs::write(&new, bytes)?;
     let _ = std::fs::remove_file(&old);
-    if let Err(e) = std::fs::rename(&exe, &old) {
+    // антивирус может на мгновение держать файлы — несколько попыток
+    let mut r = std::fs::rename(&exe, &old);
+    for _ in 0..5 {
+        if r.is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        r = std::fs::rename(&exe, &old);
+    }
+    if let Err(e) = r {
         let _ = std::fs::remove_file(&new);
         return Err(e);
     }

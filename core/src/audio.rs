@@ -278,6 +278,22 @@ impl SourceKind {
     }
 }
 
+/// Микрофон молчит дольше — переоткрываем поток.
+const MIC_STALL: Duration = Duration::from_secs(2);
+const MIC_SILENT: Duration = Duration::from_secs(20);
+/// Тише этого — не звук, а «цифровой ноль» или шум (−70 дБ).
+const MIC_QUIET: f32 = 3e-4;
+
+/// Переоткрытие микрофона — в журнал, но не чаще раза в 10 минут (в паузах оно бывает часто).
+fn note_reopen(stalled: bool) {
+    static LAST: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+    let mut l = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if l.is_none_or(|t| t.elapsed() > Duration::from_secs(600)) {
+        *l = Some(Instant::now());
+        crate::util::log(if stalled { "микрофон перестал присылать звук — переоткрываю" } else { "микрофон 20 с в тишине — переоткрываю на всякий случай" });
+    }
+}
+
 fn pos_of(qpc: i64, t0: i64) -> i64 {
     ((qpc - t0) as i128 * RATE as i128 / 10_000_000) as i64
 }
@@ -507,6 +523,13 @@ fn run_source(index: usize, kind: &SourceKind, t0: i64, out: &Sender<Chunk>, sto
         let mut rs = Resampler::new(o.rate);
         let mut frames_buf: Vec<(f32, f32)> = Vec::with_capacity(4800);
         let mut last_check = Instant::now();
+        // микрофон иногда «замолкает»: поток открыт, ошибок нет, а данных или звука нет
+        // (USB уснул, программа микрофона перенастроила его). Тогда переоткрываем поток —
+        // ровно то, что помогало при повторном выборе микрофона в настройках.
+        let is_mic = matches!(kind, SourceKind::Mic(_));
+        let opened_at = Instant::now();
+        let mut last_packet = Instant::now();
+        let mut last_sound = Instant::now();
         let tol = RATE as i64 / 100; // 10 мс
 
         let r = (|| -> Result<()> {
@@ -533,6 +556,10 @@ fn run_source(index: usize, kind: &SourceKind, t0: i64, out: &Sender<Chunk>, sto
                         }
                     }
                     cap.ReleaseBuffer(frames)?;
+                    last_packet = Instant::now();
+                    if frames_buf.iter().any(|&(l, r)| l.abs().max(r.abs()) > MIC_QUIET) {
+                        last_sound = last_packet;
+                    }
 
                     let mut samples = Vec::with_capacity(frames as usize * 2 + 8);
                     rs.process(&frames_buf, &mut samples);
@@ -565,6 +592,14 @@ fn run_source(index: usize, kind: &SourceKind, t0: i64, out: &Sender<Chunk>, sto
                             WaitForSingleObject(ev, 10);
                         }
                         None => std::thread::sleep(Duration::from_millis(5)),
+                    }
+                }
+                if is_mic {
+                    let stalled = last_packet.elapsed() > MIC_STALL;
+                    let silent = last_sound.elapsed() > MIC_SILENT && opened_at.elapsed() > MIC_SILENT;
+                    if stalled || silent {
+                        note_reopen(stalled);
+                        return Ok(());
                     }
                 }
                 if last_check.elapsed() > Duration::from_secs(2) {
