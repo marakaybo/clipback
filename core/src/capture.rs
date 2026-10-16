@@ -109,9 +109,13 @@ impl Duplicator {
     }
 
     /// Перезапустить захват (экран давно «стоит», а на нём игра во весь экран).
+    /// Захват отбирают снова и снова, и между попытками идёт пауза. Сторожу в это время
+    /// трогать захват нельзя: каждый перезапуск заставляет полноэкранную игру мигнуть.
+    pub fn backing_off(&self) -> bool {
+        self.lost_in_row > 2
+    }
+
     pub fn reset(&mut self) -> bool {
-        self.lost_in_row = 0;
-        self.retry_at = None;
         self.recreate().is_ok()
     }
 
@@ -210,10 +214,10 @@ impl Duplicator {
                     // обычная смена режима экрана — пересоздаём сразу
                     let _ = self.recreate();
                 } else {
-                    // захват отбирают снова и снова — ждём, с каждым разом дольше (до 2 с)
+                    // захват отбирают снова и снова — ждём, с каждым разом дольше (до 5 с)
                     self.dup = None;
                     self.holding = false;
-                    let ms = (50u64 << (self.lost_in_row - 3).min(6)).min(2000);
+                    let ms = (50u64 << (self.lost_in_row - 3).min(7)).min(5000);
                     self.retry_at = Some(Instant::now() + Duration::from_millis(ms));
                 }
                 Ok(Frame::Lost)

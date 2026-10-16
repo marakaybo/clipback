@@ -409,7 +409,7 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
         if last_watch.elapsed() >= Duration::from_secs(1) {
             last_watch = Instant::now();
             let stale = last_new.elapsed();
-            if stale > Duration::from_secs(3) && last_kick.elapsed() > Duration::from_secs(3) {
+            if stale > Duration::from_secs(3) && last_kick.elapsed() > Duration::from_secs(3) && !dup.backing_off() {
                 if let Some(title) = crate::util::fullscreen_window_on(mon_rect) {
                     last_kick = Instant::now();
                     kicks_in_row += 1;
