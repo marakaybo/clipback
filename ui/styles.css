@@ -479,7 +479,6 @@ body.grabbing, body.grabbing * { cursor: grabbing !important; }
 .switch.xs { width: 24px; height: 14px; }
 .switch.xs span::after { left: 2px; top: 2px; width: 10px; height: 10px; }
 .switch.xs input:checked + span::after { transform: translateX(10px); }
-.tracks-hint { margin: 6px 12px 0; }
 
 .progress { margin: 0 12px 10px; height: 4px; border-radius: 2px; background: var(--s4); overflow: hidden; flex: none; }
 .progress-fill { height: 100%; width: 0; background: var(--accent); transition: width .15s linear; }
@@ -520,7 +519,16 @@ input[type=range] { -webkit-appearance: none; appearance: none; height: 3px; bor
 input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 12px; border-radius: 50%; background: var(--text); }
 
 /* ---------- Уведомления ---------- */
-.toasts { position: fixed; top: 16px; right: 16px; display: flex; flex-direction: column; gap: 6px; z-index: 60; pointer-events: none; }
+/* в свободной середине верхней строки: одна строка, ничего не закрывает */
+.toasts { flex: 1 1 0; min-width: 0; display: flex; justify-content: center; pointer-events: none; }
+.toasts .toast {
+  pointer-events: auto; width: auto; max-width: 100%; min-width: 0;
+  padding: 4px 5px 4px 10px; gap: 8px; border-radius: var(--r); box-shadow: none;
+}
+.toasts .toast-text { flex-direction: row; align-items: baseline; gap: 8px; }
+.toasts .toast b { flex: none; }
+.toasts .toast small { display: block; white-space: nowrap; -webkit-line-clamp: unset; }
+.toasts .toast .ticon svg { width: 16px; height: 16px; }
 .toast-action { margin-left: auto; flex: none; padding: 4px 10px; border-radius: var(--r); background: var(--s4); color: var(--text); font-weight: 600; font-size: var(--fs-sm); }
 .toast-action:hover { background: var(--accent); color: #0b1220; }
 .toast {

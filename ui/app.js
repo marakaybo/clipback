@@ -146,7 +146,8 @@ function main() {
       };
       t.append(b);
     }
-    $("#toasts").append(t);
+    // одно уведомление за раз: новое заменяет старое
+    $("#toasts").replaceChildren(t);
     setTimeout(close, action ? action.ms || 9000 : icon === "error" ? 5000 : 2800);
   }
 
@@ -1209,7 +1210,6 @@ function main() {
       row.append(vol);
       box.append(row);
     }
-    $("#tracks-hint").hidden = vis.length < 1;
     drawPeaks(c);
   }
 
@@ -1317,15 +1317,15 @@ function main() {
       const f = sizeFit(S.outT - S.inT, S.discordMb, exportTracks(c));
       if (!f.ok) {
         hint.classList.add("warn");
-        hint.textContent = `Отрезок слишком длинный для ${S.discordMb} МБ: поместится до ${f.maxSecs} с. Сократите его или выберите лимит больше.`;
+        hint.textContent = `Не влезет в ${S.discordMb} МБ — максимум ${f.maxSecs} с.`;
       } else {
-        hint.textContent = `Уложится в ${S.discordMb} МБ: ${Math.min(f.h, c.height)}p, ≈ ${(f.video / 1e6).toFixed(1)} Мбит/с, одна дорожка звука — Discord играет только первую.`;
+        hint.textContent = `${Math.min(f.h, c.height)}p, ≈ ${(f.video / 1e6).toFixed(1)} Мбит/с`;
       }
     } else if (S.exportQuality === "original" || !c) {
-      hint.textContent = "Без перекодирования: мгновенно и без потерь. Начало сдвигается к ближайшему ключевому кадру (до 1 с раньше).";
+      hint.textContent = "Без потерь, мгновенно";
     } else {
       const o = qualityOut(c, S.exportQuality);
-      hint.textContent = `${o.h}p, ≈ ${(o.bitrate / 1e6).toFixed(1)} Мбит/с. Перекодируется на видеокарте, режется точно по кадру.`;
+      hint.textContent = `${o.h}p, ≈ ${(o.bitrate / 1e6).toFixed(1)} Мбит/с`;
     }
   }
 
@@ -1545,7 +1545,7 @@ function main() {
     const s = S.state && S.state.settings;
     if (s && s.confirmDelete) {
       const what = list.length === 1 ? `«${clipTitle(list[0])}»` : `${list.length} шт., ${mb(total)}`;
-      const ok = await confirmBox("Отправить в корзину?", `${what} — несколько секунд можно нажать «Вернуть», потом — из корзины Windows.`, "В корзину", "Больше не спрашивать");
+      const ok = await confirmBox("Отправить в корзину?", `${what} можно будет вернуть.`, "В корзину", "Больше не спрашивать");
       if (!ok) return;
       if (confirmBox.checked) saveSettings({ confirmDelete: false });
     }

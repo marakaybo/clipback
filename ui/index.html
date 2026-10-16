@@ -25,9 +25,6 @@
     </div>
   </div>
 
-  <!-- Уведомления внутри окна -->
-  <div class="toasts" id="toasts"></div>
-
   <div class="backdrop" id="backdrop"></div>
 
   <div class="app" id="app">
@@ -39,6 +36,9 @@
         <span class="status-main" id="status-main">Запуск…</span>
         <span class="status-source" id="source-label"></span>
       </div>
+
+      <!-- уведомления — в свободной середине верхней строки, ничего не закрывают -->
+      <div class="toasts" id="toasts"></div>
 
       <div class="top-actions">
         <button class="btn btn-ghost rec-btn" id="btn-record">
@@ -207,7 +207,6 @@
             </div>
             <div class="playhead" id="playhead"><div class="ph-knob"></div></div>
           </div>
-          <div class="hint tracks-hint" id="tracks-hint" hidden>Выключенная дорожка не попадёт в отрезок. Громкость справа меняет звук дорожки в сохранённом отрезке (в плеере звучит исходный клип). «Звук системы» — это весь звук компьютера, включая приложения с отдельными дорожками.</div>
         </section>
 
         <!-- Редактор скриншота -->
@@ -360,7 +359,7 @@
             <div class="range-wrap"><input type="range" min="1" max="40" step="1" id="set-buffer"><span class="mono" id="set-buffer-val">5 мин</span></div>
           </div>
           <div class="opt">
-            <div><b>Монитор</b><small>Если игра не пишется — проверьте, что выбран тот монитор, где она идёт</small></div>
+            <div><b>Монитор</b><small>Монитор, на котором игра</small></div>
             <select id="set-monitor"></select>
           </div>
           <div class="opt">
@@ -396,7 +395,7 @@
             <div><b>Битрейт</b><small>Чем больше, тем чётче картинка и тяжелее файл</small></div>
             <div class="range-wrap"><input type="range" min="2" max="60" step="1" id="set-custom-bitrate"><span class="mono" id="set-custom-bitrate-val">12 Мбит/с</span></div>
           </div>
-          <p class="muted small-note">Изменения видео перезапускают запись — текущий буфер очистится.</p>
+          <p class="muted small-note">При изменении буфер очистится</p>
         </section>
 
         <section class="tab" data-tab="audio">
@@ -406,11 +405,11 @@
             <div class="seg" id="set-audio-mode"><button class="seg-btn" data-v="simple">Обычный</button><button class="seg-btn" data-v="advanced">Расширенный</button></div>
           </div>
           <div class="opt">
-            <div><b>Звук системы</b><small>Всё, что слышно в наушниках: игра, Discord, музыка</small></div>
+            <div><b>Звук системы</b><small>Игра, Discord, музыка</small></div>
             <label class="switch"><input type="checkbox" id="set-system-audio"><span></span></label>
           </div>
           <div class="opt">
-            <div><b>Микрофон</b><small>Отдельной дорожкой — при сохранении отрезка его можно убрать</small></div>
+            <div><b>Микрофон</b><small>Отдельной дорожкой</small></div>
             <label class="switch"><input type="checkbox" id="set-mic"><span></span></label>
           </div>
           <div class="opt mic-row">
@@ -425,7 +424,7 @@
             </div>
           </div>
           <div class="opt mic-row">
-            <div><b>Автоусиление голоса</b><small>Тихий голос в записи поднимается до нормальной громкости, тишина между фразами не шумит. Не зависит от громкости микрофона в Windows</small></div>
+            <div><b>Автоусиление голоса</b><small>Выравнивает тихий и громкий голос</small></div>
             <label class="switch"><input type="checkbox" id="set-mic-agc"><span></span></label>
           </div>
           <div class="opt mic-row">
@@ -435,7 +434,7 @@
 
           <div id="apps-section" hidden>
             <h3>Дорожки приложений</h3>
-            <p class="muted small-note">Каждое приложение пишется своей дорожкой — в редакторе её можно выключить. Дорожка подключится, как только приложение запустится.</p>
+            <p class="muted small-note">Каждое приложение — своя дорожка</p>
             <div class="app-list" id="app-list"></div>
             <div class="add-app">
               <select id="add-app-select"></select>
@@ -451,7 +450,7 @@
           <div class="opt"><div><b>Открыть оверлей</b></div><button class="keybind" data-key="hotkeyOverlay"></button></div>
           <div class="opt"><div><b>Сохранить повтор</b></div><button class="keybind" data-key="hotkeySave"></button></div>
           <div class="opt"><div><b>Скриншот экрана</b></div><button class="keybind" data-key="hotkeyScreenshot"></button></div>
-          <div class="opt"><div><b>Начать / остановить запись</b><small>Полноценная запись в файл, без ограничения по длине</small></div><button class="keybind" data-key="hotkeyRecord"></button></div>
+          <div class="opt"><div><b>Начать / остановить запись</b><small>Запись без ограничения длины</small></div><button class="keybind" data-key="hotkeyRecord"></button></div>
           <p class="muted small-note">Нажмите на клавишу, затем нужное сочетание. Esc — отмена.</p>
           <h3>В редакторе</h3>
           <dl class="keys-ref">
@@ -480,7 +479,7 @@
           <div class="opt"><div><b>Имена файлов</b><small>Название игры и время: «Battlefield 6 2026-10-15 21-48-03»</small></div></div>
           <h3>Автоочистка</h3>
           <div class="opt">
-            <div><b>Убирать старые клипы</b><small>Самые старые уходят в корзину Windows. Избранное и клипы младше часа не трогаются</small></div>
+            <div><b>Убирать старые клипы</b><small>Старые клипы уходят в корзину, избранное не трогается</small></div>
             <label class="switch"><input type="checkbox" id="set-auto-clean"><span></span></label>
           </div>
           <div class="opt clean-row">
@@ -508,7 +507,7 @@
           </div>
           <h3>Скриншоты</h3>
           <div class="opt">
-            <div><b>Копировать скриншот в буфер</b><small>После Alt+F1 картинку можно сразу вставить в чат через Ctrl+V</small></div>
+            <div><b>Копировать скриншот в буфер</b><small>Скриншот сразу в буфер обмена</small></div>
             <label class="switch"><input type="checkbox" id="set-shot-clipboard"><span></span></label>
           </div>
           <div class="opt">
@@ -527,19 +526,19 @@
             <label class="switch"><input type="checkbox" id="set-autostart"><span></span></label>
           </div>
           <div class="opt">
-            <div><b>Курсор в записи</b><small>Указатель мыши виден в повторах и записи (на скриншотах его нет)</small></div>
+            <div><b>Курсор в записи</b><small>Курсор виден в видео</small></div>
             <label class="switch"><input type="checkbox" id="set-rec-cursor"><span></span></label>
           </div>
           <div class="opt">
-            <div><b>Значок записи</b><small>Полупрозрачный кружок в правом верхнем углу, пока идёт запись. В само видео не попадает</small></div>
+            <div><b>Значок записи</b><small>Кружок в углу экрана, в видео не попадает</small></div>
             <label class="switch"><input type="checkbox" id="set-rec-indicator"><span></span></label>
           </div>
           <div class="opt">
-            <div><b>Звук при сохранении</b><small>Тихий щелчок, когда сохранён повтор или скриншот, и при начале и конце записи</small></div>
+            <div><b>Звук при сохранении</b><small>Щелчок при сохранении и записи</small></div>
             <label class="switch"><input type="checkbox" id="set-save-sound"><span></span></label>
           </div>
           <div class="opt">
-            <div><b>Спрашивать перед удалением</b><small>Клип уходит в корзину Windows, оттуда его можно вернуть</small></div>
+            <div><b>Спрашивать перед удалением</b><small>Можно вернуть из корзины Windows</small></div>
             <label class="switch"><input type="checkbox" id="set-confirm-delete"><span></span></label>
           </div>
           <div class="opt">
@@ -561,7 +560,7 @@
           <div class="progress" id="upd-progress" hidden><div class="progress-fill"></div></div>
           <div class="notes upd-notes" id="upd-notes" hidden></div>
           <div class="opt">
-            <div><b>Проверять при запуске</b><small>Только проверка — без вашего согласия ничего не скачивается</small></div>
+            <div><b>Проверять при запуске</b><small>Без вашего согласия ничего не скачивается</small></div>
             <label class="switch"><input type="checkbox" id="set-check-updates"><span></span></label>
           </div>
           <p class="muted small-note" id="about">Clipback · открытый код · GPL-3.0 · <span id="about-kind"></span></p>
