@@ -248,21 +248,35 @@ pub fn take_whats_new(app: AppHandle) -> Option<WhatsNew> {
 
 /// Тихая проверка при запуске: если есть новая версия — сказать интерфейсу.
 pub fn check_on_start(app: AppHandle) {
+    // Сразу после включения компьютера интернета ещё может не быть — тогда пробуем снова
+    // через 2 минуты. И проверяем каждые 6 часов: программа месяцами живёт в трее,
+    // а раньше узнавала о новой версии только при запуске.
     tauri::async_runtime::spawn(async move {
         tokio_sleep(8).await;
-        match check_update(app.clone()).await {
-            Ok(Some(info)) => {
-                crate::log(format!("доступно обновление {}", info.version));
-                let _ = app.emit("update-available", info);
-                // для проверки обновления без интерфейса: сразу ставить найденное
-                if std::env::var_os("CLIPBACK_UPDATE_AUTO").is_some() {
-                    if let Err(e) = install_update(app.clone()).await {
-                        crate::log(e);
+        let mut told = String::new();
+        loop {
+            let wait = match check_update(app.clone()).await {
+                Ok(Some(info)) => {
+                    if info.version != told {
+                        crate::log(format!("доступно обновление {}", info.version));
+                        told = info.version.clone();
                     }
+                    let _ = app.emit("update-available", info);
+                    // для проверки обновления без интерфейса: сразу ставить найденное
+                    if std::env::var_os("CLIPBACK_UPDATE_AUTO").is_some() {
+                        if let Err(e) = install_update(app.clone()).await {
+                            crate::log(e);
+                        }
+                    }
+                    6 * 3600
                 }
-            }
-            Ok(None) => {}
-            Err(e) => crate::log(e),
+                Ok(None) => 6 * 3600,
+                Err(e) => {
+                    crate::log(format!("{e} — попробую через 2 минуты"));
+                    120
+                }
+            };
+            tokio_sleep(wait).await;
         }
     });
 }

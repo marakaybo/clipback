@@ -242,11 +242,23 @@ impl Resampler {
 /// часам микрофона уйти на 10 мс (у fifine — через 69 с), и дальше выбрасывалось всё.
 #[derive(Default)]
 pub struct Placer {
+    /// Счётчики для журнала, кадры 48 кГц.
+    pub stats: PlaceStats,
     /// Позиция, с которой встанет следующий кадр.
     next: Option<i64>,
     /// Сглаженное расхождение «наш счёт − метки устройства», кадры (>0 — мы впереди).
     err: f64,
     correcting: bool,
+}
+
+#[derive(Default, Debug, Clone, Copy)]
+pub struct PlaceStats {
+    /// Ушло в запись звука устройства.
+    pub sent: i64,
+    /// Вставлено тишины (устройство молчало или задержалось).
+    pub silence: i64,
+    /// Выброшено (пришло «из прошлого»).
+    pub dropped: i64,
 }
 
 impl Placer {
@@ -281,6 +293,7 @@ impl Placer {
         let base = if d > Self::SMOOTH {
             // разрыв: устройство молчало — заполняем тишиной
             out.push((next, vec![0.0; d as usize * 2]));
+            self.stats.silence += d;
             self.next = Some(start);
             self.reset_clock();
             start
@@ -296,7 +309,9 @@ impl Placer {
         let first = cur.max(0); // до начала записи ничего не пишем
         let lead = first - base;
         let end = base + n;
+        self.stats.dropped += (first - base).clamp(0, n);
         if end > first {
+            self.stats.sent += end - first;
             let mut s = samples;
             if lead > 0 {
                 s.drain(..lead as usize * 2);
@@ -317,6 +332,7 @@ impl Placer {
             }
             Some(from) if target - from > RATE as i64 / 10 => {
                 self.next = Some(target);
+                self.stats.silence += target - from;
                 Some((from, vec![0.0; (target - from) as usize * 2]))
             }
             _ => None,
@@ -350,9 +366,10 @@ pub fn spawn_source(index: usize, kind: SourceKind, t0: i64, out: Sender<Chunk>,
                 let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
             }
             let mut placer = Placer::new();
+            let mut diag = Diag::new();
             let mut last_err = String::new();
             while !stop.load(Ordering::Relaxed) {
-                match run_source(index, &kind, t0, &out, &stop, &mut placer) {
+                match run_source(index, &kind, t0, &out, &stop, &mut placer, &mut diag) {
                     Ok(()) => last_err.clear(),
                     Err(e) => {
                         // одну и ту же ошибку пишем в журнал один раз
@@ -365,6 +382,9 @@ pub fn spawn_source(index: usize, kind: SourceKind, t0: i64, out: Sender<Chunk>,
                         while Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
                             std::thread::sleep(Duration::from_millis(50));
                             fill_silence(index, t0, &out, &mut placer, 0);
+                        }
+                        if diag.since.elapsed() >= Diag::every() {
+                            diag.report(&kind, &mut placer);
                         }
                     }
                 }
@@ -616,6 +636,60 @@ unsafe fn open(kind: &SourceKind, en: &IMMDeviceEnumerator) -> Result<Opened> {
     Ok(Opened { client, fmt, rate, ch, block, dev_id, event: None, pid: 0 })
 }
 
+/// Сводка об источнике звука раз в 5 минут — по ней видно, на каком шаге пропадает звук:
+/// не приходит от устройства, приходит нулями, выбрасывается при расстановке или тонет в тишине.
+pub struct Diag {
+    since: Instant,
+    /// Кадров от устройства (в его частоте) и сама частота.
+    frames: u64,
+    rate: u32,
+    packets: u64,
+    /// Пакеты с флагом «тишина» от Windows.
+    silent_packets: u64,
+    /// Пик сырого сигнала до усиления.
+    peak: f32,
+    reopens: u32,
+}
+
+impl Diag {
+    /// Раз в 5 минут (CLIPBACK_DIAG_SECS — чаще, для проверки).
+    pub fn every() -> Duration {
+        static E: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+        *E.get_or_init(|| Duration::from_secs(std::env::var("CLIPBACK_DIAG_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(300)))
+    }
+
+    pub fn new() -> Self {
+        Self { since: Instant::now(), frames: 0, rate: RATE, packets: 0, silent_packets: 0, peak: 0.0, reopens: 0 }
+    }
+
+    fn report(&mut self, kind: &SourceKind, p: &mut Placer) {
+        let secs = |f: i64| f as f64 / RATE as f64;
+        let st = std::mem::take(&mut p.stats);
+        let peak_db = if self.peak > 0.0 { format!("{:.0} дБ", 20.0 * self.peak.log10()) } else { "ноль".into() };
+        crate::util::log(format!(
+            "звук ({}) за {:.0} мин: от устройства {:.1} с в {} пакетах (с пометкой «тишина» {}), пик {:.4} ({peak_db}); в запись {:.1} с, вставлено тишины {:.1} с, выброшено {:.1} с, поправка часов {:+.0} ppm, переоткрытий {}",
+            kind.describe(),
+            self.since.elapsed().as_secs_f64() / 60.0,
+            self.frames as f64 / self.rate.max(1) as f64,
+            self.packets,
+            self.silent_packets,
+            self.peak,
+            secs(st.sent),
+            secs(st.silence),
+            secs(st.dropped),
+            p.correction() * 1e6,
+            self.reopens,
+        ));
+        *self = Self { reopens: 0, ..Self::new() };
+    }
+}
+
+impl Default for Diag {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Метка времени первого кадра куска (100 нс, QPC). Бывает, что её нет (захват приложения)
 /// или драйвер присылает ерунду — тогда считаем от момента, когда кусок до нас дошёл.
 pub fn sane_time(qpc: i64, frames: u32, rate: u32, now: i64) -> i64 {
@@ -627,7 +701,7 @@ pub fn sane_time(qpc: i64, frames: u32, rate: u32, now: i64) -> i64 {
     }
 }
 
-fn run_source(index: usize, kind: &SourceKind, t0: i64, out: &Sender<Chunk>, stop: &AtomicBool, placer: &mut Placer) -> Result<()> {
+fn run_source(index: usize, kind: &SourceKind, t0: i64, out: &Sender<Chunk>, stop: &AtomicBool, placer: &mut Placer, diag: &mut Diag) -> Result<()> {
     use windows::Win32::System::Threading::WaitForSingleObject;
     unsafe {
         let en: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
@@ -639,6 +713,7 @@ fn run_source(index: usize, kind: &SourceKind, t0: i64, out: &Sender<Chunk>, sto
         o.client.Start()?;
 
         let mut rs = Resampler::new(o.rate);
+        diag.rate = o.rate;
         let mut frames_buf: Vec<(f32, f32)> = Vec::with_capacity(4800);
         let mut last_check = Instant::now();
         // микрофон иногда «замолкает»: поток открыт, ошибок нет, а данных или звука нет
@@ -676,6 +751,14 @@ fn run_source(index: usize, kind: &SourceKind, t0: i64, out: &Sender<Chunk>, sto
                         }
                     }
                     cap.ReleaseBuffer(frames)?;
+                    diag.packets += 1;
+                    diag.frames += frames as u64;
+                    if fl & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 {
+                        diag.silent_packets += 1;
+                    }
+                    for &(l, r) in &frames_buf {
+                        diag.peak = diag.peak.max(l.abs()).max(r.abs());
+                    }
                     last_packet = Instant::now();
                     if frames_buf.iter().any(|&(l, r)| l.abs().max(r.abs()) > MIC_QUIET) {
                         last_sound = last_packet;
@@ -712,8 +795,12 @@ fn run_source(index: usize, kind: &SourceKind, t0: i64, out: &Sender<Chunk>, sto
                     let silent = last_sound.elapsed() > MIC_SILENT && opened_at.elapsed() > MIC_SILENT;
                     if stalled || silent {
                         note_reopen(stalled);
+                        diag.reopens += 1;
                         return Ok(());
                     }
+                }
+                if diag.since.elapsed() >= Diag::every() {
+                    diag.report(kind, placer);
                 }
                 if last_check.elapsed() > Duration::from_secs(2) {
                     last_check = Instant::now();

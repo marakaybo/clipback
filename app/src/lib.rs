@@ -18,7 +18,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder, WindowEvent};
@@ -239,7 +239,32 @@ fn start_recording(app: &AppHandle) {
                     i.error = Some(format!("{e:#}"));
                 }
                 emit_state(&app);
+                retry_recording_later(&app, generation);
             }
+        }
+    });
+}
+
+/// Запись упала или не запустилась (монитор ещё не готов после включения компьютера,
+/// видеокарта сбросила устройство) — пробуем снова через 5 с, если пользователь за это
+/// время ничего не включал и не выключал. Не больше 20 попыток в час.
+fn retry_recording_later(app: &AppHandle, generation: u64) {
+    static TRIES: Mutex<Vec<Instant>> = Mutex::new(Vec::new());
+    {
+        let mut t = TRIES.lock().unwrap_or_else(|e| e.into_inner());
+        t.retain(|x| x.elapsed() < Duration::from_secs(3600));
+        if t.len() >= 20 {
+            log("запись: 20 перезапусков за час — больше не пробую, нужна помощь пользователя");
+            return;
+        }
+        t.push(Instant::now());
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(5));
+        if st(&app).generation.load(Ordering::SeqCst) == generation && lock(&app).recorder.is_none() {
+            log("запись: пробую запустить снова");
+            start_recording(&app);
         }
     });
 }
@@ -331,7 +356,8 @@ fn forward_events(app: AppHandle, events: mpsc::Receiver<Event>, generation: u64
                 show_indicator(&app, false);
                 drop(rec);
                 emit_state(&app);
-                show_toast(&app, "Запись остановилась", &message, "error");
+                show_toast(&app, "Запись остановилась", &format!("{message}. Перезапускаю…"), "error");
+                retry_recording_later(&app, generation);
                 break;
             }
             Event::Started { .. } => {}

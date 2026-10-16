@@ -230,6 +230,19 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
         audio_error,
     });
 
+    // Сторож захвата: Desktop Duplication иногда «замирает» (полноэкранная игра, смена режима
+    // экрана) — ошибок нет, а новых кадров тоже нет, и в повтор шла одна и та же картинка.
+    // Если экран давно не обновлялся, а на мониторе игра во весь экран, — перезапускаем захват.
+    // Раз в 10 минут пишем в журнал сводку: по ней видно, что происходило с захватом.
+    let mon_rect = unsafe { g.output.GetDesc() }.map(|d| d.DesktopCoordinates).unwrap_or_default();
+    let mut last_new = Instant::now();
+    let mut last_kick = Instant::now();
+    let mut last_watch = Instant::now();
+    let mut stale_note: Option<Instant> = None; // когда писали «экран не обновляется»
+    let mut stale_logged = false;
+    let mut kicks_in_row = 0u32;
+    let mut health = Health::new();
+
     let frame_ns = 1_000_000_000u64 / fps as u64;
     let mut idx: i64 = 0;
     let mut have_frame = false;
@@ -348,6 +361,20 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
             match got {
                 Frame::New(tex) => {
                     dbg.new_frames += 1;
+                    health.new_frames += 1;
+                    let gap = last_new.elapsed();
+                    if gap > health.longest_gap {
+                        health.longest_gap = gap;
+                    }
+                    last_new = Instant::now();
+                    if stale_logged {
+                        stale_logged = false;
+                        crate::util::log(format!(
+                            "захват: кадры снова идут (не было {:.0} с, перезапусков захвата: {kicks_in_row})",
+                            gap.as_secs_f64()
+                        ));
+                    }
+                    kicks_in_row = 0;
                     let d = texture_desc(&tex);
                     let fd = texture_desc(&pipe.frame);
                     if (d.Width, d.Height) != (fd.Width, fd.Height) {
@@ -372,9 +399,38 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
                     }
                 }
                 Frame::Timeout => dbg.timeouts += 1,
-                Frame::Lost => dbg.lost += 1,
+                Frame::Lost => {
+                    dbg.lost += 1;
+                    health.lost += 1;
+                }
             }
             continue;
+        }
+        if last_watch.elapsed() >= Duration::from_secs(1) {
+            last_watch = Instant::now();
+            let stale = last_new.elapsed();
+            if stale > Duration::from_secs(3) && last_kick.elapsed() > Duration::from_secs(3) {
+                if let Some(title) = crate::util::fullscreen_window_on(mon_rect) {
+                    last_kick = Instant::now();
+                    kicks_in_row += 1;
+                    health.kicks += 1;
+                    let ok = dup.reset();
+                    // в журнал — не чаще раза в 5 минут
+                    if stale_note.is_none_or(|t| t.elapsed() > Duration::from_secs(300)) {
+                        stale_note = Some(Instant::now());
+                        stale_logged = true;
+                        crate::util::log(format!(
+                            "захват: экран не обновляется {:.0} с, а во весь экран открыто «{title}» — перезапускаю захват ({})",
+                            stale.as_secs_f64(),
+                            if ok { "получилось".to_string() } else { format!("не вышло: {}", dup.stats.last_error) }
+                        ));
+                    }
+                }
+            }
+            if health.since.elapsed() >= crate::audio::Diag::every() * 2 {
+                health.report(&mut dup.stats, dropped);
+                health = Health::new();
+            }
         }
         if now < due {
             // кадр уже взят (или осталась доля миллисекунды) — просто дожидаемся момента выдачи
@@ -472,6 +528,37 @@ impl Drop for Finishing {
         for t in self.0.drain(..) {
             let _ = t.join();
         }
+    }
+}
+
+/// Сводка о захвате за 10 минут — в журнал.
+struct Health {
+    since: Instant,
+    new_frames: u64,
+    lost: u32,
+    kicks: u32,
+    longest_gap: Duration,
+}
+
+impl Health {
+    fn new() -> Self {
+        Self { since: Instant::now(), new_frames: 0, lost: 0, kicks: 0, longest_gap: Duration::ZERO }
+    }
+
+    fn report(&self, cap: &mut crate::capture::CapStats, dropped_total: u64) {
+        let mins = self.since.elapsed().as_secs_f64() / 60.0;
+        let err = if cap.last_error.is_empty() { String::new() } else { format!(", последняя ошибка: {}", cap.last_error) };
+        crate::util::log(format!(
+            "захват за {mins:.0} мин: новых кадров экрана {}, самая долгая пауза {:.0} с, потерь захвата {}, ошибок {}, пересозданий {} (неудачных {}), перезапусков сторожем {}, пропущено кадров видео всего {dropped_total}{err}",
+            self.new_frames,
+            self.longest_gap.as_secs_f64(),
+            self.lost,
+            cap.errors,
+            cap.resets,
+            cap.reset_fails,
+            self.kicks,
+        ));
+        *cap = crate::capture::CapStats::default();
     }
 }
 

@@ -1,7 +1,8 @@
 //! Захват монитора через DXGI Desktop Duplication.
 //! В процесс игры ничего не внедряется — античиты на это не реагируют.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
+use std::time::{Duration, Instant};
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D, D3D11_TEXTURE2D_DESC};
 use windows::Win32::Graphics::Dxgi::{
@@ -33,6 +34,29 @@ pub struct Duplicator {
     /// Журнал: одинаковые ошибки пишем не чаще раза в 30 с, со счётчиком.
     err_logged: Option<std::time::Instant>,
     err_unlogged: u32,
+    /// Имя монитора (\\.\DISPLAY1) — чтобы найти его заново, если Windows его «пересоздала».
+    name: String,
+    /// С какого момента захвата нет (пересоздание не удаётся).
+    none_since: Option<Instant>,
+    last_reopen: Option<Instant>,
+    /// Счётчики для журнала (сбрасывает тот, кто их пишет).
+    pub stats: CapStats,
+}
+
+/// Что происходило с захватом — для сводки в журнале.
+#[derive(Default, Debug, Clone)]
+pub struct CapStats {
+    /// Захват пересоздан успешно.
+    pub resets: u32,
+    /// Пересоздать не вышло.
+    pub reset_fails: u32,
+    /// Ошибки при получении кадра.
+    pub errors: u32,
+    pub last_error: String,
+}
+
+fn describe(e: &windows::core::Error) -> String {
+    format!("{} (0x{:08X})", e.message().trim(), e.code().0 as u32)
 }
 
 impl Duplicator {
@@ -47,16 +71,73 @@ impl Duplicator {
             errors_in_row: 0,
             err_logged: None,
             err_unlogged: 0,
+            name: unsafe { output.GetDesc() }.map(|d| crate::gpu::wide_to_string(&d.DeviceName)).unwrap_or_default(),
+            none_since: None,
+            last_reopen: None,
+            stats: CapStats::default(),
         };
         d.recreate().context("не удалось начать захват экрана")?;
+        d.stats = CapStats::default();
         Ok(d)
     }
 
     fn recreate(&mut self) -> Result<()> {
         self.dup = None;
         self.holding = false;
-        self.dup = Some(unsafe { self.output.DuplicateOutput(&self.device)? });
+        match unsafe { self.output.DuplicateOutput(&self.device) } {
+            Ok(d) => {
+                self.dup = Some(d);
+                self.none_since = None;
+                self.stats.resets += 1;
+                Ok(())
+            }
+            Err(e) => {
+                self.none_since.get_or_insert_with(Instant::now);
+                self.stats.reset_fails += 1;
+                self.stats.last_error = describe(&e);
+                Err(e.into())
+            }
+        }
+    }
+
+    /// Перезапустить захват (экран давно «стоит», а на нём игра во весь экран).
+    pub fn reset(&mut self) -> bool {
+        self.recreate().is_ok()
+    }
+
+    /// Видеокарта сбросила устройство (драйвер перезапустился, игра «уронила» видеокарту) —
+    /// с этим устройством захват уже не оживёт: запись надо запускать заново.
+    fn check_device(&self) -> Result<()> {
+        if let Err(e) = unsafe { self.device.GetDeviceRemovedReason() } {
+            bail!("видеокарта сбросила устройство захвата: {}", describe(&e));
+        }
         Ok(())
+    }
+
+    /// Найти монитор заново: после смены режима экрана или полноэкранной игры старый
+    /// объект монитора может перестать давать захват, а новый — работает.
+    fn reopen_output(&mut self) -> Result<()> {
+        use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIDevice, IDXGIFactory1};
+        let luid = unsafe { self.device.cast::<IDXGIDevice>()?.GetAdapter()?.GetDesc()? }.AdapterLuid;
+        let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1()? };
+        let mut a = 0;
+        while let Ok(adapter) = unsafe { factory.EnumAdapters1(a) } {
+            a += 1;
+            let d = unsafe { adapter.GetDesc1()? };
+            if (d.AdapterLuid.LowPart, d.AdapterLuid.HighPart) != (luid.LowPart, luid.HighPart) {
+                continue;
+            }
+            let mut o = 0;
+            while let Ok(output) = unsafe { adapter.EnumOutputs(o) } {
+                o += 1;
+                let od = unsafe { output.GetDesc()? };
+                if crate::gpu::wide_to_string(&od.DeviceName) == self.name {
+                    self.output = output.cast()?;
+                    return self.recreate();
+                }
+            }
+        }
+        bail!("монитор {} больше не подключён к этой видеокарте", self.name)
     }
 
     /// Размер текущего захватываемого изображения.
@@ -68,10 +149,23 @@ impl Duplicator {
 
     pub fn acquire(&mut self, timeout_ms: u32) -> Result<Frame> {
         if self.dup.is_none() {
+            self.check_device()?;
             // предыдущее пересоздание не удалось (например, открыт экран UAC) — пробуем снова
             if self.recreate().is_err() {
-                std::thread::sleep(std::time::Duration::from_millis(timeout_ms.max(1) as u64));
-                return Ok(Frame::Timeout);
+                // не выходит дольше 2 с — ищем монитор заново
+                let now = Instant::now();
+                if self.none_since.is_some_and(|t| now.duration_since(t) > Duration::from_secs(2))
+                    && self.last_reopen.is_none_or(|t| now.duration_since(t) > Duration::from_secs(2))
+                {
+                    self.last_reopen = Some(now);
+                    if let Err(e) = self.reopen_output() {
+                        self.stats.last_error = format!("{e:#}");
+                    }
+                }
+                if self.dup.is_none() {
+                    std::thread::sleep(std::time::Duration::from_millis(timeout_ms.max(1) as u64));
+                    return Ok(Frame::Timeout);
+                }
             }
             return Ok(Frame::Lost);
         }
@@ -96,7 +190,10 @@ impl Duplicator {
             }
             Err(e) => {
                 self.errors_in_row += 1;
+                self.stats.errors += 1;
+                self.stats.last_error = describe(&e);
                 self.log_error(&e);
+                self.check_device()?;
                 if e.code() == DXGI_ERROR_INVALID_CALL && self.errors_in_row < 10 {
                     // кадр мог остаться не отпущенным — отпускаем и пробуем снова, захват не трогаем
                     unsafe {

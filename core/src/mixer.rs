@@ -402,6 +402,10 @@ fn mixer_loop(lay: Layout, mut encoders: Vec<AacEncoder>, t0: i64, out: Sender<(
     let mut st = MixState::new(lay.sources.len(), Instant::now());
     let mut agcs: Vec<Option<Agc>> = lay.sources.iter().map(|s| s.agc.then(Agc::new)).collect();
     let mut packets = Vec::new();
+    // сводка раз в 5 минут: какой звук на самом деле ушёл в каждую дорожку файла
+    let mut report_at = Instant::now();
+    let mut track_peak = vec![0f32; lay.tracks.len()];
+    let mut track_secs = vec![0f64; lay.tracks.len()];
 
     while !stop.load(Ordering::Relaxed) {
         match rx.recv_timeout(Duration::from_millis(20)) {
@@ -426,6 +430,8 @@ fn mixer_loop(lay: Layout, mut encoders: Vec<AacEncoder>, t0: i64, out: Sender<(
         while let Some((pos, parts)) = st.next_block(Instant::now()) {
             for (k, (t, enc)) in lay.tracks.iter().zip(encoders.iter_mut()).enumerate() {
                 let s = render_track(t, &lay.sources, &parts);
+                track_peak[k] = s.iter().fold(track_peak[k], |a, &b| a.max(b.abs()));
+                track_secs[k] += s.len() as f64 / 2.0 / RATE as f64;
                 packets.clear();
                 if let Err(e) = enc.encode(pos, &s, &mut packets) {
                     crate::util::log(format!("AAC: {e:#}"));
@@ -434,6 +440,23 @@ fn mixer_loop(lay: Layout, mut encoders: Vec<AacEncoder>, t0: i64, out: Sender<(
                     let _ = out.send((k, p));
                 }
             }
+        }
+        if report_at.elapsed() >= audio::Diag::every() {
+            let mins = report_at.elapsed().as_secs_f64() / 60.0;
+            report_at = Instant::now();
+            let parts: Vec<String> = lay
+                .tracks
+                .iter()
+                .enumerate()
+                .map(|(k, t)| {
+                    let p = track_peak[k];
+                    let db = if p > 0.0 { format!("{:.0} дБ", 20.0 * p.log10()) } else { "тишина".into() };
+                    format!("«{}» {:.0} с, пик {db}", t.name, track_secs[k])
+                })
+                .collect();
+            crate::util::log(format!("звук в файл за {mins:.0} мин: {}", parts.join("; ")));
+            track_peak.iter_mut().for_each(|p| *p = 0.0);
+            track_secs.iter_mut().for_each(|s| *s = 0.0);
         }
     }
     stop.store(true, Ordering::Relaxed);

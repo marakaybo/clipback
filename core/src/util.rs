@@ -47,6 +47,31 @@ pub fn foreground_window() -> Option<(String, u32)> {
     }
 }
 
+/// Окно в фокусе закрывает весь прямоугольник `r` (игра во весь экран на этом мониторе)?
+/// Возвращает заголовок такого окна.
+pub fn fullscreen_window_on(r: windows::Win32::Foundation::RECT) -> Option<String> {
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowRect, GetWindowTextW};
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0.is_null() {
+            return None;
+        }
+        let mut w = windows::Win32::Foundation::RECT::default();
+        GetWindowRect(hwnd, &mut w).ok()?;
+        if !(w.left <= r.left && w.top <= r.top && w.right >= r.right && w.bottom >= r.bottom) {
+            return None;
+        }
+        let mut buf = [0u16; 256];
+        let n = GetWindowTextW(hwnd, &mut buf);
+        let title = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
+        // рабочий стол и панель задач — не игра
+        if title.is_empty() || title == "Program Manager" {
+            return None;
+        }
+        Some(title)
+    }
+}
+
 /// Сделать из заголовка окна короткое имя для файла:
 /// «Minecraft* 1.21.1 - Singleplayer» -> «Minecraft 1.21.1».
 pub fn clip_label(title: &str) -> Option<String> {
