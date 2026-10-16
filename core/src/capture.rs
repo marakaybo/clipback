@@ -14,11 +14,31 @@ use crate::cursor::{Pointer, PointerShape};
 pub enum Frame {
     /// Новый кадр. Текстуру нужно скопировать и затем вызвать `release`.
     New(ID3D11Texture2D),
-    /// За отведённое время экран не изменился.
+    /// Нового кадра нет: экран не изменился или захват ждёт следующей попытки.
     Timeout,
-    /// Захват потерян (смена режима экрана, UAC, полноэкранная игра) — пересоздан.
+    /// Захват только что пересоздан — кадров с него ещё не было.
     Lost,
 }
+
+/// Когда снова создавать захват после потери. Каждое создание Desktop Duplication заставляет
+/// Windows перерисовать курсор, а полноэкранную игру — перестроить вывод. Пересоздавать без
+/// пауз нельзя: курсор мигал, а Minecraft на F11 мерцал и подтормаживал (захват пересоздавался
+/// десятки и сотни раз в секунду). Поэтому одно правило для любой потери, как в OBS:
+/// первая — сразу (обычный Alt+Tab или смена режима экрана), вторая подряд — через 0,5 с,
+/// дальше — раз в 3 с. «Подряд» — если с прошлой потери прошло меньше `LOSS_WINDOW`:
+/// одного кадра мало, игра на весь экран даёт кадр и тут же снова отбирает захват.
+fn retry_delay(losses_in_row: u32) -> Duration {
+    match losses_in_row {
+        0 | 1 => Duration::ZERO,
+        2 => Duration::from_millis(500),
+        _ => Duration::from_secs(3),
+    }
+}
+
+/// Потери чаще, чем раз в столько, считаются идущими подряд.
+const LOSS_WINDOW: Duration = Duration::from_secs(10);
+/// Пересоздать не вышло (например, открыт экран UAC) — следующая попытка через столько.
+const FAIL_RETRY: Duration = Duration::from_millis(250);
 
 pub struct Duplicator {
     device: ID3D11Device,
@@ -39,12 +59,11 @@ pub struct Duplicator {
     /// С какого момента захвата нет (пересоздание не удаётся).
     none_since: Option<Instant>,
     last_reopen: Option<Instant>,
-    /// Потерь захвата подряд без единого нового кадра.
-    lost_in_row: u32,
-    /// Раньше этого момента захват заново не создаём. Каждое пересоздание заставляет
-    /// Windows перерисовать курсор, и без паузы он мигает (было ~940 пересозданий в секунду,
-    /// пока свёрнутая полноэкранная игра раз за разом отбирала захват).
-    retry_at: Option<Instant>,
+    /// Потери захвата подряд и время последней — для `retry_delay`.
+    losses_in_row: u32,
+    last_loss: Option<Instant>,
+    /// Пока захвата нет — когда пробовать создать его снова.
+    retry_at: Instant,
     /// Счётчики для журнала (сбрасывает тот, кто их пишет).
     pub stats: CapStats,
 }
@@ -56,6 +75,8 @@ pub struct CapStats {
     pub resets: u32,
     /// Пересоздать не вышло.
     pub reset_fails: u32,
+    /// Захват потерян (Windows отобрала его, ошибки не проходят, сторож перезапустил).
+    pub losses: u32,
     /// Ошибки при получении кадра.
     pub errors: u32,
     pub last_error: String,
@@ -80,8 +101,9 @@ impl Duplicator {
             name: unsafe { output.GetDesc() }.map(|d| crate::gpu::wide_to_string(&d.DeviceName)).unwrap_or_default(),
             none_since: None,
             last_reopen: None,
-            lost_in_row: 0,
-            retry_at: None,
+            losses_in_row: 0,
+            last_loss: None,
+            retry_at: Instant::now(),
             stats: CapStats::default(),
         };
         d.recreate().context("не удалось начать захват экрана")?;
@@ -90,8 +112,7 @@ impl Duplicator {
     }
 
     fn recreate(&mut self) -> Result<()> {
-        self.dup = None;
-        self.holding = false;
+        self.drop_dup();
         match unsafe { self.output.DuplicateOutput(&self.device) } {
             Ok(d) => {
                 self.dup = Some(d);
@@ -103,20 +124,38 @@ impl Duplicator {
                 self.none_since.get_or_insert_with(Instant::now);
                 self.stats.reset_fails += 1;
                 self.stats.last_error = describe(&e);
+                self.retry_at = Instant::now() + FAIL_RETRY;
                 Err(e.into())
             }
         }
     }
 
-    /// Перезапустить захват (экран давно «стоит», а на нём игра во весь экран).
-    /// Захват отбирают снова и снова, и между попытками идёт пауза. Сторожу в это время
-    /// трогать захват нельзя: каждый перезапуск заставляет полноэкранную игру мигнуть.
-    pub fn backing_off(&self) -> bool {
-        self.lost_in_row > 2
+    fn drop_dup(&mut self) {
+        self.release();
+        self.dup = None;
     }
 
-    pub fn reset(&mut self) -> bool {
-        self.recreate().is_ok()
+    /// Захват потерян (или не оживает): закрываем его и назначаем следующую попытку.
+    fn lose(&mut self) {
+        let now = Instant::now();
+        let in_row = self.last_loss.is_some_and(|t| now.duration_since(t) < LOSS_WINDOW);
+        self.losses_in_row = if in_row { self.losses_in_row + 1 } else { 1 };
+        self.last_loss = Some(now);
+        self.errors_in_row = 0;
+        self.stats.losses += 1;
+        self.drop_dup();
+        self.retry_at = now + retry_delay(self.losses_in_row);
+    }
+
+    /// Захват сейчас закрыт и ждёт следующей попытки.
+    pub fn waiting(&self) -> bool {
+        self.dup.is_none()
+    }
+
+    /// Перезапустить захват (экран давно «стоит», а на нём игра во весь экран).
+    /// Это такая же потеря, как и остальные: частоту попыток ограничивает `retry_delay`.
+    pub fn reset(&mut self) {
+        self.lose();
     }
 
     /// Видеокарта сбросила устройство (драйвер перезапустился, игра «уронила» видеокарту) —
@@ -162,65 +201,51 @@ impl Duplicator {
     }
 
     pub fn acquire(&mut self, timeout_ms: u32) -> Result<Frame> {
-        if self.dup.is_none() {
+        let timeout = Duration::from_millis(timeout_ms.max(1) as u64);
+        let Some(dup) = self.dup.clone() else {
             self.check_device()?;
-            // пауза перед повторной попыткой ещё не прошла
-            if let Some(left) = self.retry_at.map(|t| t.saturating_duration_since(Instant::now())) {
-                if !left.is_zero() {
-                    std::thread::sleep(left.min(Duration::from_millis(timeout_ms.max(1) as u64)));
-                    return Ok(Frame::Timeout);
+            let left = self.retry_at.saturating_duration_since(Instant::now());
+            if !left.is_zero() {
+                std::thread::sleep(left.min(timeout));
+                return Ok(Frame::Timeout);
+            }
+            if self.recreate().is_ok() {
+                return Ok(Frame::Lost);
+            }
+            // не выходит дольше 2 с — ищем монитор заново
+            let now = Instant::now();
+            if self.none_since.is_some_and(|t| now.duration_since(t) > Duration::from_secs(2))
+                && self.last_reopen.is_none_or(|t| now.duration_since(t) > Duration::from_secs(2))
+            {
+                self.last_reopen = Some(now);
+                match self.reopen_output() {
+                    Ok(()) => return Ok(Frame::Lost),
+                    Err(e) => self.stats.last_error = format!("{e:#}"),
                 }
             }
-            // предыдущее пересоздание не удалось (например, открыт экран UAC) — пробуем снова
-            if self.recreate().is_err() {
-                self.retry_at = Some(Instant::now() + Duration::from_millis(200));
-                // не выходит дольше 2 с — ищем монитор заново
-                let now = Instant::now();
-                if self.none_since.is_some_and(|t| now.duration_since(t) > Duration::from_secs(2))
-                    && self.last_reopen.is_none_or(|t| now.duration_since(t) > Duration::from_secs(2))
-                {
-                    self.last_reopen = Some(now);
-                    if let Err(e) = self.reopen_output() {
-                        self.stats.last_error = format!("{e:#}");
-                    }
-                }
-                if self.dup.is_none() {
-                    std::thread::sleep(std::time::Duration::from_millis(timeout_ms.max(1) as u64));
-                    return Ok(Frame::Timeout);
-                }
-            }
-            return Ok(Frame::Lost);
-        }
+            return Ok(Frame::Timeout);
+        };
         self.release();
-        let dup = self.dup.clone().unwrap();
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource: Option<IDXGIResource> = None;
         match unsafe { dup.AcquireNextFrame(timeout_ms, &mut info, &mut resource) } {
             Ok(()) => {
                 self.holding = true;
                 self.errors_in_row = 0;
-                self.lost_in_row = 0;
-                self.retry_at = None;
-                let dup = dup.clone();
                 self.read_pointer(&dup, &info);
                 // кадр, где сдвинулась только мышь, тоже годится: содержимое то же
-                let tex: ID3D11Texture2D = resource.context("пустой кадр")?.cast()?;
-                Ok(Frame::New(tex))
+                match resource.and_then(|r| r.cast::<ID3D11Texture2D>().ok()) {
+                    Some(tex) => Ok(Frame::New(tex)),
+                    None => {
+                        self.release();
+                        Ok(Frame::Timeout)
+                    }
+                }
             }
             Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => Ok(Frame::Timeout),
             Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => {
-                self.lost_in_row += 1;
-                if self.lost_in_row <= 2 {
-                    // обычная смена режима экрана — пересоздаём сразу
-                    let _ = self.recreate();
-                } else {
-                    // захват отбирают снова и снова — ждём, с каждым разом дольше (до 5 с)
-                    self.dup = None;
-                    self.holding = false;
-                    let ms = (50u64 << (self.lost_in_row - 3).min(7)).min(5000);
-                    self.retry_at = Some(Instant::now() + Duration::from_millis(ms));
-                }
-                Ok(Frame::Lost)
+                self.lose();
+                Ok(Frame::Timeout)
             }
             Err(e) => {
                 self.errors_in_row += 1;
@@ -228,18 +253,17 @@ impl Duplicator {
                 self.stats.last_error = describe(&e);
                 self.log_error(&e);
                 self.check_device()?;
-                if e.code() == DXGI_ERROR_INVALID_CALL && self.errors_in_row < 10 {
+                if e.code() == DXGI_ERROR_INVALID_CALL && self.errors_in_row < 3 {
                     // кадр мог остаться не отпущенным — отпускаем и пробуем снова, захват не трогаем
                     unsafe {
                         let _ = dup.ReleaseFrame();
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    std::thread::sleep(Duration::from_millis(5).min(timeout));
                     return Ok(Frame::Timeout);
                 }
-                // ошибка не проходит — пересоздаём захват
-                self.errors_in_row = 0;
-                let _ = self.recreate();
-                Ok(Frame::Lost)
+                // ошибка не проходит — захват потерян
+                self.lose();
+                Ok(Frame::Timeout)
             }
         }
     }
@@ -305,4 +329,17 @@ pub fn texture_desc(t: &ID3D11Texture2D) -> D3D11_TEXTURE2D_DESC {
     let mut d = D3D11_TEXTURE2D_DESC::default();
     unsafe { t.GetDesc(&mut d) };
     d
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_delay_grows_then_stays_at_three_seconds() {
+        assert_eq!(retry_delay(1), Duration::ZERO);
+        assert_eq!(retry_delay(2), Duration::from_millis(500));
+        assert_eq!(retry_delay(3), Duration::from_secs(3));
+        assert_eq!(retry_delay(1000), Duration::from_secs(3));
+    }
 }

@@ -78,11 +78,12 @@ pub fn open(monitor: usize) -> Result<Gpu> {
     let device = device.unwrap();
     let context = context.unwrap();
 
+    // Приоритет на видеокарте — обычный, как у любой программы: игра важнее записи.
+    // Раньше просили «высокий» класс, и под нагрузкой Clipback отнимал время у игры.
     // кодировщик Media Foundation работает с устройством из своего потока
     unsafe {
         let _ = device.cast::<ID3D11Multithread>()?.SetMultithreadProtected(true);
     }
-    raise_gpu_priority(&device);
 
     let adesc = unsafe { adapter.GetDesc1()? };
     let odesc = unsafe { output.GetDesc()? };
@@ -96,29 +97,6 @@ pub fn open(monitor: usize) -> Result<Gpu> {
         width: (r.right - r.left) as u32,
         height: (r.bottom - r.top) as u32,
     })
-}
-
-#[link(name = "gdi32")]
-extern "system" {
-    fn D3DKMTSetProcessSchedulingPriorityClass(process: windows::Win32::Foundation::HANDLE, class: i32) -> i32;
-}
-
-/// Игра, которая грузит видеокарту на 100 %, не должна отнимать у записи кадры:
-/// поднимаем приоритет процесса в планировщике видеокарты (как OBS и ShadowPlay).
-/// Без прав администратора доступен «высокий» класс — его и просим.
-fn raise_gpu_priority(device: &ID3D11Device) {
-    const HIGH: i32 = 4; // D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH
-    unsafe {
-        let r = D3DKMTSetProcessSchedulingPriorityClass(windows::Win32::System::Threading::GetCurrentProcess(), HIGH);
-        if r != 0 {
-            crate::util::log(format!("приоритет видеокарты: класс «высокий» не выдан (0x{r:08X})"));
-        }
-        if let Ok(d) = device.cast::<windows::Win32::Graphics::Dxgi::IDXGIDevice>() {
-            if let Err(e) = d.SetGPUThreadPriority(7) {
-                crate::util::log(format!("приоритет видеокарты: {e}"));
-            }
-        }
-    }
 }
 
 pub fn wide_to_string(w: &[u16]) -> String {

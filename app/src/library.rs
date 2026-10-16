@@ -14,6 +14,15 @@ pub struct Favorites {
     path: PathBuf,
 }
 
+/// Записать файл целиком или не трогать вовсе: сначала во временный, потом переименовать.
+/// Иначе сбой посреди записи оставил бы пустой файл, и все метки пропали бы.
+fn write_atomic(path: &Path, data: &[u8]) {
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, data).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
 fn file_name(p: &Path) -> Option<String> {
     p.file_name().map(|n| n.to_string_lossy().to_lowercase())
 }
@@ -25,7 +34,7 @@ impl Favorites {
     }
 
     fn save(&self) {
-        let _ = std::fs::write(&self.path, serde_json::to_vec_pretty(&self.names).unwrap_or_default());
+        write_atomic(&self.path, &serde_json::to_vec_pretty(&self.names).unwrap_or_default());
     }
 
     pub fn contains(&self, p: &Path) -> bool {

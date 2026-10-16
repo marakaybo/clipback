@@ -165,9 +165,9 @@ pub fn log(msg: impl AsRef<str>) {
 fn init_log(dir: &Path) {
     let _ = std::fs::create_dir_all(dir);
     let p = dir.join("clipback.log");
-    // журнал не разрастается: больше 1 МБ — начинаем заново
+    // журнал не разрастается: больше 1 МБ — откладываем его в clipback.old.log и начинаем новый
     if std::fs::metadata(&p).map(|m| m.len() > 1_000_000).unwrap_or(false) {
-        let _ = std::fs::remove_file(&p);
+        let _ = std::fs::rename(&p, dir.join("clipback.old.log"));
     }
     *LOG_PATH.lock().unwrap() = Some(p);
     std::panic::set_hook(Box::new(|info| log(format!("ПАНИКА: {info}"))));
@@ -293,7 +293,7 @@ fn restart_recording(app: &AppHandle) {
 fn forward_events(app: AppHandle, events: mpsc::Receiver<Event>, generation: u64) {
     for ev in events.iter() {
         if st(&app).generation.load(Ordering::SeqCst) != generation {
-            break;
+            return;
         }
         match ev {
             Event::Status { buffered_secs, buffer_bytes, fps, dropped } => {
@@ -358,10 +358,27 @@ fn forward_events(app: AppHandle, events: mpsc::Receiver<Event>, generation: u64
                 emit_state(&app);
                 show_toast(&app, "Запись остановилась", &format!("{message}. Перезапускаю…"), "error");
                 retry_recording_later(&app, generation);
-                break;
+                return;
             }
             Event::Started { .. } => {}
         }
+    }
+    // поток захвата завершился, ничего не сказав (паника — её текст уже в журнале):
+    // без этого интерфейс показывал бы, что запись идёт, а буфер бы не пополнялся
+    if st(&app).generation.load(Ordering::SeqCst) == generation {
+        log("ошибка записи: поток захвата неожиданно завершился");
+        let rec = {
+            let mut i = lock(&app);
+            i.error = Some("поток захвата неожиданно завершился".into());
+            i.status = None;
+            i.record_started = None;
+            i.recorder.take()
+        };
+        show_indicator(&app, false);
+        drop(rec);
+        emit_state(&app);
+        show_toast(&app, "Запись остановилась", "Поток захвата неожиданно завершился. Перезапускаю…", "error");
+        retry_recording_later(&app, generation);
     }
 }
 

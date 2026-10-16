@@ -253,8 +253,7 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
     // CLIPBACK_DEBUG=1 — каждые 2 с писать в журнал, на что уходит время захвата
     let debug = std::env::var_os("CLIPBACK_DEBUG").is_some();
     let mut dbg = Dbg::default();
-    // кадр экрана, который держим до момента выдачи, и было ли уже копирование в этом интервале
-    let mut held: Option<ID3D11Texture2D> = None;
+    // кадр экрана в этом интервале уже скопирован
     let mut copied = false;
     // полноценная запись; дописывающиеся файлы ждём при выходе
     // (объявлены в таком порядке, чтобы при выходе сначала закрылась текущая запись)
@@ -319,12 +318,16 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
                             (Some(a), Some(b)) => (b.pts - a.pts) as f64 / 1e7 + frame_secs,
                             _ => 0.0,
                         };
-                        let r = if silence.is_empty() && !inputs.is_empty() {
-                            // кадра тишины нет (не должно случаться) — сохраняем хотя бы видео
-                            crate::mux::write_mp4(&path, packets, out_w, out_h)
-                        } else {
-                            crate::mux::write_av_named(&path, packets, &inputs, &names, out_w, out_h)
-                        };
+                        // паника при записи файла не должна пройти молча — иначе нет ни клипа, ни сообщения
+                        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            if silence.is_empty() && !inputs.is_empty() {
+                                // кадра тишины нет (не должно случаться) — сохраняем хотя бы видео
+                                crate::mux::write_mp4(&path, packets, out_w, out_h)
+                            } else {
+                                crate::mux::write_av_named(&path, packets, &inputs, &names, out_w, out_h)
+                            }
+                        }))
+                        .unwrap_or_else(|_| Err(anyhow::anyhow!("внутренняя ошибка при записи файла (подробности в журнале)")));
                         let _ = match r {
                             Ok(()) => {
                                 let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
@@ -349,11 +352,10 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
 
         let due = start + Duration::from_nanos(idx as u64 * frame_ns);
         let now = Instant::now();
-        // Игра может рисовать сотни кадров в секунду, а видео нужно 60. Копировать каждый —
-        // лишняя работа видеокарте (под нагрузкой из-за неё и терялись кадры). Поэтому:
-        // кадр из первой половины интервала копируем не больше одного раза,
-        // кадр из второй половины держим и копируем ровно в момент выдачи.
-        if held.is_none() && now + Duration::from_micros(800) < due {
+        // Игра может рисовать сотни кадров в секунду, а видео нужно 30–60. Поэтому за интервал
+        // копируем один кадр экрана — первый новый — и сразу его отпускаем: кадр, который
+        // держит Clipback, Windows не может обновлять, а копировать каждый — лишняя работа видеокарте.
+        if !copied && now + Duration::from_micros(800) < due {
             let wait_ms = (((due - now).as_micros() + 999) / 1000).clamp(1, 100) as u32;
             let t_acq = Instant::now();
             let got = dup.acquire(wait_ms)?;
@@ -384,45 +386,36 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
                         frame_dirty = true;
                         continue;
                     }
-                    let left = due.saturating_duration_since(Instant::now());
-                    if left > Duration::from_nanos(frame_ns / 2) {
-                        if !copied {
-                            unsafe { g.context.CopyResource(&pipe.frame, &tex) };
-                            copied = true;
-                            have_frame = true;
-                            frame_dirty = true;
-                            dbg.copies += 1;
-                        }
-                        dup.release();
-                    } else {
-                        held = Some(tex);
-                    }
+                    unsafe { g.context.CopyResource(&pipe.frame, &tex) };
+                    dup.release();
+                    copied = true;
+                    have_frame = true;
+                    frame_dirty = true;
+                    dbg.copies += 1;
                 }
                 Frame::Timeout => dbg.timeouts += 1,
-                Frame::Lost => {
-                    dbg.lost += 1;
-                    health.lost += 1;
-                }
+                Frame::Lost => dbg.lost += 1,
             }
             continue;
         }
         if last_watch.elapsed() >= Duration::from_secs(1) {
             last_watch = Instant::now();
             let stale = last_new.elapsed();
-            if stale > Duration::from_secs(3) && last_kick.elapsed() > Duration::from_secs(3) && !dup.backing_off() {
+            // перезапуск, который не помог, повторяем всё реже: 3, 6, 12, 24, 48 с
+            let kick_every = Duration::from_secs(3 << kicks_in_row.min(4));
+            if stale > Duration::from_secs(3) && last_kick.elapsed() > kick_every && !dup.waiting() {
                 if let Some(title) = crate::util::fullscreen_window_on(mon_rect) {
                     last_kick = Instant::now();
                     kicks_in_row += 1;
                     health.kicks += 1;
-                    let ok = dup.reset();
+                    dup.reset();
                     // в журнал — не чаще раза в 5 минут
                     if stale_note.is_none_or(|t| t.elapsed() > Duration::from_secs(300)) {
                         stale_note = Some(Instant::now());
                         stale_logged = true;
                         crate::util::log(format!(
-                            "захват: экран не обновляется {:.0} с, а во весь экран открыто «{title}» — перезапускаю захват ({})",
+                            "захват: экран не обновляется {:.0} с, а во весь экран открыто «{title}» — перезапускаю захват",
                             stale.as_secs_f64(),
-                            if ok { "получилось".to_string() } else { format!("не вышло: {}", dup.stats.last_error) }
                         ));
                     }
                 }
@@ -433,16 +426,9 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
             }
         }
         if now < due {
-            // кадр уже взят (или осталась доля миллисекунды) — просто дожидаемся момента выдачи
+            // кадр уже скопирован (или осталась доля миллисекунды) — дожидаемся момента выдачи
             std::thread::sleep(due - now);
             continue;
-        }
-        if let Some(tex) = held.take() {
-            unsafe { g.context.CopyResource(&pipe.frame, &tex) };
-            dup.release();
-            have_frame = true;
-            frame_dirty = true;
-            dbg.copies += 1;
         }
         copied = false;
 
@@ -535,14 +521,13 @@ impl Drop for Finishing {
 struct Health {
     since: Instant,
     new_frames: u64,
-    lost: u32,
     kicks: u32,
     longest_gap: Duration,
 }
 
 impl Health {
     fn new() -> Self {
-        Self { since: Instant::now(), new_frames: 0, lost: 0, kicks: 0, longest_gap: Duration::ZERO }
+        Self { since: Instant::now(), new_frames: 0, kicks: 0, longest_gap: Duration::ZERO }
     }
 
     fn report(&self, cap: &mut crate::capture::CapStats, dropped_total: u64) {
@@ -552,7 +537,7 @@ impl Health {
             "захват за {mins:.0} мин: новых кадров экрана {}, самая долгая пауза {:.0} с, потерь захвата {}, ошибок {}, пересозданий {} (неудачных {}), перезапусков сторожем {}, пропущено кадров видео всего {dropped_total}{err}",
             self.new_frames,
             self.longest_gap.as_secs_f64(),
-            self.lost,
+            cap.losses,
             cap.errors,
             cap.resets,
             cap.reset_fails,
