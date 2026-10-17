@@ -92,7 +92,7 @@ unsafe fn device_id(d: &IMMDevice) -> Result<String> {
     Ok(s)
 }
 
-unsafe fn device_name(d: &IMMDevice) -> String {
+pub(crate) unsafe fn device_name(d: &IMMDevice) -> String {
     d.OpenPropertyStore(STGM_READ)
         .and_then(|ps| ps.GetValue(&PKEY_Device_FriendlyName))
         .map(|v| v.to_string())

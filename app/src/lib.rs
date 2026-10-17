@@ -9,6 +9,7 @@ mod settings;
 mod sound;
 mod trash;
 mod update;
+mod widgets;
 mod winutil;
 
 use base64::Engine;
@@ -554,6 +555,7 @@ fn hide_overlay(app: &AppHandle) {
                 let _ = w.hide();
             }
             let _ = app.emit_to("overlay", "overlay-hidden", ());
+            widgets::overlay_hidden(&app);
         }
     });
 }
@@ -1213,9 +1215,11 @@ async fn save_edited_image(app: AppHandle, path: String, png_base64: String, rep
 
 #[tauri::command]
 fn set_settings(app: AppHandle, settings: Settings) -> Res<Settings> {
-    let new = settings.sanitized();
+    let mut new = settings.sanitized();
     let (old, path) = {
         let mut i = lock(&app);
+        // замки громкости меняет только микшер (widgets.rs): окно настроек могло прислать старые
+        new.volume_locks = i.settings.volume_locks.clone();
         let old = std::mem::replace(&mut i.settings, new.clone());
         (old, st(&app).settings_path.clone())
     };
@@ -1475,6 +1479,7 @@ pub fn run() {
             trash: trash::Trash::default(),
             });
 
+            widgets::init(&handle);
             create_windows(&handle, start_hidden)?;
             sync_autostart(&handle);
             watch_mic(handle.clone());
@@ -1537,6 +1542,13 @@ pub fn run() {
             update::check_update,
             update::install_update,
             update::take_whats_new,
+            widgets::mixer_state,
+            widgets::set_app_volume,
+            widgets::set_app_mute,
+            widgets::set_volume_lock,
+            widgets::set_master_volume,
+            widgets::set_master_mute,
+            widgets::system_load,
         ])
         .build(tauri::generate_context!())
         .expect("не удалось запустить Clipback")

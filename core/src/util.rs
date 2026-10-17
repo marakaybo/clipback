@@ -49,6 +49,12 @@ pub fn foreground_window() -> Option<(String, u32)> {
 
 /// Имя exe-файла процесса («javaw.exe»).
 pub fn exe_name(pid: u32) -> Option<String> {
+    let path = exe_path(pid)?;
+    Some(path.rsplit('\\').next().unwrap_or(&path).to_string())
+}
+
+/// Полный путь к exe-файлу процесса.
+pub fn exe_path(pid: u32) -> Option<String> {
     use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
     unsafe {
         let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
@@ -56,11 +62,7 @@ pub fn exe_name(pid: u32) -> Option<String> {
         let mut len = buf.len() as u32;
         let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, windows::core::PWSTR(buf.as_mut_ptr()), &mut len).is_ok();
         let _ = windows::Win32::Foundation::CloseHandle(h);
-        if !ok {
-            return None;
-        }
-        let path = String::from_utf16_lossy(&buf[..len as usize]);
-        Some(path.rsplit('\\').next().unwrap_or(&path).to_string())
+        ok.then(|| String::from_utf16_lossy(&buf[..len as usize]))
     }
 }
 
