@@ -429,6 +429,7 @@ function main() {
   };
   // окно спрятали или свернули — скрытая запись снова под «мылом»
   document.addEventListener("visibilitychange", () => {
+    if (document.hidden) setPlaying(false);
     if (document.hidden && S.unveiled) {
       S.unveiled = null;
       renderVeil();
@@ -474,6 +475,25 @@ function main() {
     { root: $("#clip-list"), rootMargin: "200px" }
   );
 
+  // готовые превью списка (canvas или img) по пути и времени изменения файла:
+  // при перестройке списка они встают на место сразу, без мигания и повторной загрузки
+  const listThumbs = new Map();
+  const thumbKey = (c) => `${c.path}|${c.modified}`;
+
+  /// Выбор клипа: только подсветка, список не перестраивается.
+  function markActiveClip() {
+    let found = !S.clip;
+    for (const el of $$("#clip-list .clip")) {
+      const on = !!S.clip && el.dataset.path === S.clip.path;
+      el.classList.toggle("active", on);
+      if (on) {
+        found = true;
+        el.scrollIntoView({ block: "nearest" });
+      }
+    }
+    if (!found) renderClipList();
+  }
+
   function renderClipList() {
     renderGameFilter();
     renderPickBar();
@@ -498,13 +518,17 @@ function main() {
         box.append(h);
       }
       const el = document.createElement("button");
-      el.className = "clip" + (S.clip && c.path === S.clip.path ? " active" : "") + (S.picked.has(c.path) ? " picked" : "") + (c.hidden ? " is-hidden" : "");
+      el.className = "clip" + (c.kind === "shot" ? " is-shot" : "") + (S.clip && c.path === S.clip.path ? " active" : "") + (S.picked.has(c.path) ? " picked" : "") + (c.hidden ? " is-hidden" : "");
       el.dataset.path = c.path;
       const th = document.createElement("div");
       th.className = "thumb";
-      if (c.kind === "shot") th.insertAdjacentHTML("beforeend", `<span class="dur">${/\.png$/i.test(c.path) ? "PNG" : "JPG"}</span>`);
+      const ready = listThumbs.get(thumbKey(c));
+      if (ready) th.append(ready);
+      // фото и видео различаются с первого взгляда: у фото — голубая рамка и фотоаппарат,
+      // у видео — ▶ и длительность
+      if (c.kind === "shot") th.insertAdjacentHTML("beforeend", `<span class="kind-shot" title="Скриншот">${svg("camera")}</span>`);
       else if (c.broken) th.insertAdjacentHTML("beforeend", `<span class="dur warn">ошибка</span>`);
-      else th.insertAdjacentHTML("beforeend", `<span class="dur">${fmt(c.duration, 0)}</span>`);
+      else th.insertAdjacentHTML("beforeend", `<span class="dur"><i class="play"></i>${fmt(c.duration, 0)}</span>`);
       if (/\(отрезок\)/.test(c.name)) th.insertAdjacentHTML("beforeend", `<span class="badge" title="Отрезок">${svg("scissors")}</span>`);
       if (c.hidden) th.insertAdjacentHTML("beforeend", `<span class="veiled-mark" title="Скрытая запись"><svg viewBox="0 0 24 24"><path d="M3 3l18 18"/><path d="M10.6 5.1A10 10 0 0 1 12 5c5 0 9 4.5 10 7a14 14 0 0 1-3.2 4.2M6.6 6.6A14 14 0 0 0 2 12c1 2.5 5 7 10 7a9.6 9.6 0 0 0 4.4-1.1"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg></span>`);
       const info = document.createElement("div");
@@ -512,7 +536,7 @@ function main() {
       info.innerHTML = `<span class="clip-name"></span><span class="clip-sub"></span>`;
       info.children[0].textContent = clipTitle(c);
       const when = parseName(c.name).when ?? c.modified;
-      info.children[1].textContent = `${hhmm(when)} · ${c.kind === "shot" ? `${c.width}×${c.height}` : mb(c.size)}`;
+      info.children[1].textContent = `${hhmm(when)} · ${c.kind === "shot" ? `${c.width}×${c.height} · ${/\.png$/i.test(c.path) ? "PNG" : "JPG"}` : mb(c.size)}`;
       el.title = c.name;
       const star = document.createElement("span");
       star.className = "star" + (c.favorite ? " on" : "");
@@ -635,14 +659,23 @@ function main() {
       const cv = document.createElement("canvas");
       cv.width = 176; cv.height = 99;
       api.drawDemo(cv.getContext("2d"), 176, 99, c.kind === "shot" ? 10 : Math.max(0, c.duration - 3), c, false);
+      listThumbs.set(thumbKey(c), cv);
       th.prepend(cv);
     } else if (c.kind === "shot") {
       const img = new Image();
       img.src = api.fileUrl(c.path);
       img.loading = "lazy";
+      listThumbs.set(thumbKey(c), img);
       th.prepend(img);
     } else if (!c.broken) {
-      thumbs.get(c, Math.max(0, c.duration - 2), 176, 99, "list").then((cv) => cv && th.prepend(cv));
+      thumbs.get(c, Math.max(0, c.duration - 2), 176, 99, "list").then((cv) => {
+        if (!cv) return;
+        listThumbs.set(thumbKey(c), cv);
+        // список могли перестроить, пока кадр рисовался, — кладём в актуальную карточку
+        const now = [...$$("#clip-list .clip")].find((x) => x.dataset.path === c.path);
+        const box = now && now.querySelector(".thumb");
+        if (box && !box.querySelector("canvas, img")) box.prepend(cv);
+      });
     }
   }
 
@@ -770,7 +803,7 @@ function main() {
     $("#app").classList.toggle("no-clip", !c);
     $("#app").classList.toggle("is-shot", !!c && c.kind === "shot");
     $("#stage-msg").hidden = true;
-    renderClipList();
+    markActiveClip();
     if (!c) {
       releaseMedia();
       $("#clip-title").textContent = "";
@@ -818,6 +851,7 @@ function main() {
     if (!c.demo) {
       const url = mediaUrl(c);
       if (video.getAttribute("src") !== url) {
+        mediaRetries = 0;
         video.src = url;
       }
       video.playbackRate = S.speed;
@@ -828,8 +862,26 @@ function main() {
     updateAll();
   }
 
+  // Загрузка видео может оборваться (код 2 — «сеть»): например, оверлей грузит клип, пока
+  // окно спрятано. Файл при этом целый — пробуем ещё раз, а не показываем ошибку.
+  let mediaRetries = 0;
+  function reloadMedia() {
+    if (!video.getAttribute("src")) return;
+    const t = S.t;
+    video.load();
+    video.currentTime = t;
+  }
+  video.addEventListener("loadeddata", () => {
+    mediaRetries = 0;
+    if (S.clip && !S.clip.broken) $("#stage-msg").hidden = true;
+  });
   video.addEventListener("error", () => {
     if (!video.getAttribute("src") || !S.clip || S.clip.demo) return;
+    if (video.error && video.error.code === 2 && mediaRetries < 3) {
+      mediaRetries++;
+      setTimeout(reloadMedia, 300 * mediaRetries);
+      return;
+    }
     $("#stage-msg").hidden = false;
     $("#stage-msg").textContent = "Не удалось открыть видео.";
     api.call("frontend_log", { message: `video error ${video.error && video.error.code}: ${S.clip.path}` }).catch(() => {});
@@ -2187,6 +2239,11 @@ function main() {
   });
   api.on("overlay-will-show", () => document.documentElement.classList.remove("overlay-open"));
   api.on("overlay-shown", () => {
+    // видео не загрузилось, пока оверлей был спрятан, — сейчас окно видно, грузим заново
+    if (video.error && S.clip && S.clip.kind === "video") {
+      mediaRetries = 0;
+      reloadMedia();
+    }
     // два кадра: окно успевает показаться прозрачным, потом интерфейс плавно проявляется
     requestAnimationFrame(() => requestAnimationFrame(() => document.documentElement.classList.add("overlay-open")));
     loadClips();
@@ -2196,6 +2253,8 @@ function main() {
     setPlaying(false);
   });
   api.on("overlay-hidden", () => setPlaying(false));
+  // главное окно закрыли в трей или свернули — видео не должно играть дальше
+  api.on("main-hidden", () => setPlaying(false));
   // щелчок мимо окна Clipback закрывает оверлей
   $("#backdrop").addEventListener("pointerdown", () => call("hide_overlay_cmd"));
 

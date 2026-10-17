@@ -626,17 +626,25 @@ fn create_windows(app: &AppHandle, start_hidden: bool) -> tauri::Result<()> {
         .center()
         .build()?;
     let handle = app.clone();
-    main.on_window_event(move |e| {
-        if let WindowEvent::CloseRequested { api, .. } = e {
+    main.on_window_event(move |e| match e {
+        WindowEvent::CloseRequested { api, .. } => {
             if lock(&handle).settings.close_to_tray {
                 api.prevent_close();
                 if let Some(w) = handle.get_webview_window("main") {
                     let _ = w.hide();
                 }
+                // спрятанное окно WebView2 не считает скрытым — видео продолжало бы играть
+                let _ = handle.emit_to("main", "main-hidden", ());
             } else {
                 handle.exit(0);
             }
         }
+        WindowEvent::Resized(_) => {
+            if handle.get_webview_window("main").is_some_and(|w| w.is_minimized().unwrap_or(false)) {
+                let _ = handle.emit_to("main", "main-hidden", ());
+            }
+        }
+        _ => {}
     });
 
     let overlay = WebviewWindowBuilder::new(app, "overlay", WebviewUrl::App("index.html".into()))

@@ -249,6 +249,15 @@ html[data-mode="overlay"] .panel, html[data-mode="browser"] .panel { background:
   background: rgba(0,0,0,.72); font-variant-numeric: tabular-nums;
 }
 .thumb .dur.warn { color: var(--warn); }
+.thumb .dur { display: flex; align-items: center; gap: 4px; }
+.thumb .dur .play { width: 0; height: 0; border-left: 6px solid currentColor; border-top: 4px solid transparent; border-bottom: 4px solid transparent; }
+/* фото: голубая рамка, как у карточки, и фотоаппарат в углу */
+.clip.is-shot .thumb::after { content: ""; position: absolute; inset: 0; border: 2px solid rgba(77,168,255,.75); border-radius: inherit; pointer-events: none; }
+.thumb .kind-shot {
+  position: absolute; right: 4px; bottom: 4px; width: 22px; height: 17px; z-index: 1;
+  display: grid; place-items: center; border-radius: 3px; background: var(--accent); color: #0b1220;
+}
+.thumb .kind-shot svg { width: 13px; height: 13px; stroke-width: 2.2; }
 .thumb .badge {
   position: absolute; left: 3px; top: 3px; width: 18px; height: 18px;
   display: grid; place-items: center; border-radius: 3px; background: rgba(0,0,0,.72);
