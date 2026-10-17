@@ -25,9 +25,13 @@
 
   root.innerHTML = `
     <section class="panel wg" id="wg-mixer">
-      <div class="wg-head"><span>Звук</span><span class="wg-sub" id="mx-device"></span></div>
+      <div class="wg-head"><span>Звук</span><select class="wg-dev" id="mx-device" title="Устройство вывода"></select></div>
       <div class="mx-row mx-master" id="mx-master"></div>
       <div class="mx-list" id="mx-list"></div>
+      <div id="mx-mic-box" hidden>
+        <div class="wg-head wg-mic-head"><span>Микрофон</span><select class="wg-dev" id="mx-mic-device" title="Микрофон"></select></div>
+        <div class="mx-row mx-master" id="mx-mic"></div>
+      </div>
     </section>
     <section class="panel wg" id="wg-load">
       <div class="wg-head"><span>Система</span><span class="wg-sub" id="ld-gpu"></span></div>
@@ -63,7 +67,11 @@
   }
   const isBusy = (key, input) => document.activeElement === input && input.matches(":active") || (mixer.busyUntil.get(key) || 0) > Date.now();
 
-  function makeRow(key, master) {
+  /// kind: "master" — общая громкость, "mic" — микрофон, иначе — приложение.
+  function makeRow(key, kind) {
+    const master = !!kind;
+    const volCmd = kind === "mic" ? "set_mic_volume" : master ? "set_master_volume" : "set_app_volume";
+    const muteCmd = kind === "mic" ? "set_mic_mute" : master ? "set_master_mute" : "set_app_mute";
     const row = el("div", "mx-row" + (master ? " mx-master" : ""));
     const mute = el("button", "icon-btn xs mx-mute");
     const body = el("div", "mx-body");
@@ -72,8 +80,8 @@
     const val = el("span", "mx-val mono");
     top.append(name, val);
     const r = slider(
-      (v) => { busy(key); val.textContent = Math.round(v * 100); call(master ? "set_master_volume" : "set_app_volume", master ? { volume: v } : { key, volume: v }).catch(() => {}); },
-      (v) => { busy(key); call(master ? "set_master_volume" : "set_app_volume", master ? { volume: v } : { key, volume: v }).catch(() => {}); }
+      (v) => { busy(key); val.textContent = Math.round(v * 100); call(volCmd, master ? { volume: v } : { key, volume: v }).catch(() => {}); },
+      (v) => { busy(key); call(volCmd, master ? { volume: v } : { key, volume: v }).catch(() => {}); }
     );
     r.addEventListener("input", () => { val.textContent = r.value; });
     body.append(top, r);
@@ -84,7 +92,7 @@
       o.data.muted = muted;
       busy(key);
       paintRow(o);
-      call(master ? "set_master_mute" : "set_app_mute", master ? { muted } : { key, muted }).catch(() => {});
+      call(muteCmd, master ? { muted } : { key, muted }).catch(() => {});
     };
     if (!master) {
       const lock = el("button", "icon-btn xs mx-lock");
@@ -131,23 +139,51 @@
     paintRow(o);
   }
 
+  /// Список устройств; выбор делает устройство устройством по умолчанию в Windows.
+  /// Пока список открыт, его не перерисовываем.
+  function fillDevices(sel, list, current) {
+    if (document.activeElement === sel) return;
+    const sig = list.map((d) => d.id + (d.isDefault ? "*" : "")).join("|") || current;
+    if (sel.dataset.sig === sig) return;
+    sel.dataset.sig = sig;
+    sel.replaceChildren(...(list.length ? list : [{ id: "", name: current, isDefault: true }]).map((d) => new Option(d.name, d.id, d.isDefault, d.isDefault)));
+    sel.disabled = list.length < 2;
+    sel.title = current;
+    sel.onchange = () => {
+      sel.blur();
+      call("set_default_device", { id: sel.value }).then(refreshMixer).catch(() => {});
+    };
+  }
+
   async function refreshMixer() {
     let m;
     try {
       m = await call("mixer_state");
     } catch (e) {
-      document.getElementById("mx-device").textContent = "";
+      const dev = document.getElementById("mx-device");
+      dev.replaceChildren();
+      dev.dataset.sig = "";
       document.getElementById("mx-list").innerHTML = `<div class="wg-empty">Нет устройства вывода</div>`;
       mixer.rows.clear();
       return;
     }
-    document.getElementById("mx-device").textContent = m.device;
-    document.getElementById("mx-device").title = m.device;
+    fillDevices(document.getElementById("mx-device"), m.outputs || [], m.device);
     if (!mixer.master) {
-      mixer.master = makeRow("@master", true);
+      mixer.master = makeRow("@master", "master");
       document.getElementById("mx-master").replaceWith(mixer.master.row);
     }
     fill(mixer.master, { name: "Общая", volume: m.master, muted: m.masterMuted }, "@master");
+
+    // микрофон по умолчанию: выбор, громкость, «без звука»
+    document.getElementById("mx-mic-box").hidden = !m.mic;
+    if (m.mic) {
+      fillDevices(document.getElementById("mx-mic-device"), m.mics || [], m.mic.name);
+      if (!mixer.mic) {
+        mixer.mic = makeRow("@mic", "mic");
+        document.getElementById("mx-mic").replaceWith(mixer.mic.row);
+      }
+      fill(mixer.mic, { name: "Громкость", volume: m.mic.volume, muted: m.mic.muted }, "@mic");
+    }
 
     const list = document.getElementById("mx-list");
     const seen = new Set();
@@ -172,7 +208,7 @@
   }
 
   // ---------- нагрузка ----------
-  const HIST = 40;
+  const HIST = 120; // секунд: история приходит из приложения, замер идёт в фоне
   const hist = { cpu: [], gpu: [] };
   const grid = document.getElementById("ld-grid");
   const tiles = {};
@@ -193,10 +229,8 @@
     t.bar.style.width = pct == null ? "0" : Math.max(0, Math.min(100, pct)) + "%";
     // память на исходе — жёлтым; видеокарта на 99 % в игре — это нормально
     t.tile.classList.toggle("hot", (id === "vram" || id === "ram") && pct != null && pct >= 90);
-    if (t.line && pct != null) {
-      const h = hist[id];
-      h.push(pct);
-      if (h.length > HIST) h.shift();
+    if (t.line && hist[id].length) {
+      const h = hist[id].slice(-HIST);
       const off = HIST - h.length;
       t.line.setAttribute("points", h.map((v, i) => `${off + i},${(20 - (v / 100) * 19).toFixed(1)}`).join(" "));
     }
@@ -210,6 +244,8 @@
       return;
     }
     if (!open) return;
+    hist.cpu = l.cpuHistory || [];
+    hist.gpu = l.gpuHistory || [];
     document.getElementById("ld-gpu").textContent = l.gpuName || "";
     document.getElementById("ld-gpu").title = l.gpuName || "";
     setTile("cpu", l.cpu, l.cpu == null ? "—" : `${Math.round(l.cpu)}%`);
@@ -232,10 +268,7 @@
     if (now === open) return;
     open = now;
     clearTimeout(timer);
-    if (open) {
-      hist.cpu.length = hist.gpu.length = 0;
-      tick();
-    }
+    if (open) tick();
   }
   new MutationObserver(sync).observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
   sync();

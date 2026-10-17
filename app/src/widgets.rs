@@ -6,21 +6,65 @@ use crate::settings::VolumeLock;
 use crate::{err, lock, log, st, Res};
 use clipback_core::{sysload, volume};
 use serde::Serialize;
-use std::sync::Mutex;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
 
 pub struct Widgets {
     keeper: volume::VolumeKeeper,
-    /// Счётчики нагрузки открыты только пока оверлей на экране.
-    load: Mutex<Option<sysload::Sampler>>,
+    /// Последний замер нагрузки и история — их пишет фоновый поток (`sample_load`).
+    load: Arc<Mutex<LoadState>>,
 }
 
-/// Запустить замок громкости с замками из настроек. Держит громкость, пока Clipback запущен.
+/// Сколько секунд истории нагрузки хранить (график в оверлее).
+const HISTORY: usize = 120;
+
+#[derive(Default)]
+struct LoadState {
+    last: Option<LoadDto>,
+    cpu: VecDeque<f32>,
+    gpu: VecDeque<f32>,
+}
+
+/// Запустить замок громкости с замками из настроек и замер нагрузки.
+/// Оба работают в фоне, пока Clipback запущен.
 pub fn init(app: &AppHandle) {
     let keeper = volume::VolumeKeeper::start();
     keeper.set_locks(lock_list(&lock(app).settings.volume_locks));
-    app.manage(Widgets { keeper, load: Mutex::new(None) });
+    let load = Arc::new(Mutex::new(LoadState::default()));
+    let l = load.clone();
+    let _ = std::thread::Builder::new().name("clipback-load".into()).spawn(move || sample_load(l));
+    app.manage(Widgets { keeper, load });
+}
+
+/// Нагрузка — раз в секунду всё время: при открытии оверлея цифры и график уже готовы.
+/// Это несколько счётчиков Windows (те же, что у диспетчера задач) — на игру не влияет.
+fn sample_load(state: Arc<Mutex<LoadState>>) {
+    let mut sampler = match sysload::Sampler::new() {
+        Ok(s) => s,
+        Err(e) => {
+            log(format!("нагрузка компьютера: {e:#}"));
+            return;
+        }
+    };
+    loop {
+        // проценты считаются между двумя замерами — первый замер только запоминает отсчёт
+        std::thread::sleep(Duration::from_secs(1));
+        let load = sampler.sample();
+        let dto = LoadDto { load, gpu_temp: crate::nvidia::gpu_temperature(), cpu_history: Vec::new(), gpu_history: Vec::new() };
+        let Ok(mut guard) = state.lock() else { return };
+        let s = &mut *guard;
+        for (h, v) in [(&mut s.cpu, dto.load.cpu), (&mut s.gpu, dto.load.gpu)] {
+            if let Some(v) = v {
+                h.push_back(v);
+                if h.len() > HISTORY {
+                    h.pop_front();
+                }
+            }
+        }
+        s.last = Some(dto);
+    }
 }
 
 fn lock_list(locks: &[VolumeLock]) -> Vec<(String, f32)> {
@@ -29,15 +73,6 @@ fn lock_list(locks: &[VolumeLock]) -> Vec<(String, f32)> {
 
 fn widgets(app: &AppHandle) -> tauri::State<'_, Widgets> {
     app.state::<Widgets>()
-}
-
-/// Оверлей спрятан — счётчики больше не нужны.
-pub fn overlay_hidden(app: &AppHandle) {
-    if let Some(w) = app.try_state::<Widgets>() {
-        if let Ok(mut l) = w.load.lock() {
-            *l = None;
-        }
-    }
 }
 
 /// Изменить замки, сохранить настройки и передать замки потоку замка.
@@ -67,6 +102,9 @@ pub struct MixerDto {
     master: f32,
     master_muted: bool,
     apps: Vec<MixerApp>,
+    outputs: Vec<volume::Endpoint>,
+    mic: Option<volume::MicState>,
+    mics: Vec<volume::Endpoint>,
 }
 
 #[tauri::command]
@@ -82,7 +120,27 @@ pub async fn mixer_state(app: AppHandle) -> Res<MixerDto> {
             .into_iter()
             .map(|a| MixerApp { locked: locks.iter().any(|l| l.key == a.key), app: a })
             .collect(),
+        outputs: m.outputs,
+        mic: m.mic,
+        mics: m.mics,
     })
+}
+
+/// Сделать устройство вывода или микрофон устройством по умолчанию в Windows.
+#[tauri::command]
+pub async fn set_default_device(id: String) -> Res<()> {
+    log(format!("звук: устройство по умолчанию → {id}"));
+    volume::set_default_device(&id).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+pub async fn set_mic_volume(volume: f32) -> Res<()> {
+    volume::set_mic_volume(if volume.is_finite() { volume } else { 1.0 }).map_err(err)
+}
+
+#[tauri::command]
+pub async fn set_mic_mute(muted: bool) -> Res<()> {
+    volume::set_mic_mute(muted).map_err(err)
 }
 
 #[tauri::command]
@@ -127,29 +185,25 @@ pub async fn set_master_mute(muted: bool) -> Res<()> {
     volume::set_master_mute(muted).map_err(err)
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct LoadDto {
     #[serde(flatten)]
     load: sysload::Load,
     /// °C; None — не NVIDIA или драйвер не ответил.
     gpu_temp: Option<i32>,
+    /// Процессор и видеокарта за последние `HISTORY` секунд, % (для графика).
+    cpu_history: Vec<f32>,
+    gpu_history: Vec<f32>,
 }
 
-/// Нагрузка компьютера. Оверлей спрашивает раз в секунду, пока открыт.
+/// Нагрузка компьютера: последний фоновый замер и история. Оверлей спрашивает раз в секунду.
 #[tauri::command]
 pub async fn system_load(app: AppHandle) -> Res<LoadDto> {
     let w = widgets(&app);
-    let fresh = w.load.lock().map_err(err)?.is_none();
-    if fresh {
-        let s = sysload::Sampler::new().map_err(|e| format!("{e:#}"))?;
-        *w.load.lock().map_err(err)? = Some(s);
-        // проценты считаются между двумя замерами
-        let _ = tauri::async_runtime::spawn_blocking(|| std::thread::sleep(Duration::from_millis(250))).await;
-    }
-    let load = match w.load.lock().map_err(err)?.as_mut() {
-        Some(s) => s.sample(),
-        None => return Err("оверлей закрыт".into()),
-    };
-    Ok(LoadDto { load, gpu_temp: crate::nvidia::gpu_temperature() })
+    let s = w.load.lock().map_err(err)?;
+    let mut dto = s.last.clone().ok_or("нагрузка ещё считается")?;
+    dto.cpu_history = s.cpu.iter().copied().collect();
+    dto.gpu_history = s.gpu.iter().copied().collect();
+    Ok(dto)
 }

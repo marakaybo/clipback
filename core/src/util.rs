@@ -121,6 +121,21 @@ pub fn unique_path(dir: &std::path::Path, base: &str, ext: &str) -> PathBuf {
     p
 }
 
+/// Папка для нового клипа: своя для каждой игры (как у NVIDIA), если `per_game` и игра известна.
+pub fn clip_dir(out: &std::path::Path, game: Option<&str>, per_game: bool) -> PathBuf {
+    let name: String = game
+        .unwrap_or("")
+        .chars()
+        .filter(|c| !matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') && !c.is_control())
+        .collect();
+    let name = name.trim().trim_end_matches('.').trim();
+    if per_game && !name.is_empty() {
+        out.join(name)
+    } else {
+        out.to_path_buf()
+    }
+}
+
 /// Метка времени для имени файла: 2026-10-15 21-48-03
 pub fn file_stamp() -> String {
     let t = unsafe { GetLocalTime() };

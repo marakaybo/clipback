@@ -46,6 +46,14 @@
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-weight: 400; font-size: var(--fs-xs); color: var(--text-3);
 }
+.wg-dev {
+  width: auto; max-width: 62%; min-width: 0; height: 26px; padding: 0 4px;
+  border: none; background: transparent; color: var(--text-3);
+  font-weight: 400; font-size: var(--fs-xs); text-overflow: ellipsis;
+}
+.wg-dev:hover:not(:disabled) { color: var(--text); background: var(--s1); }
+.wg-dev:disabled { opacity: 1; cursor: default; appearance: none; }
+.wg-mic-head { border-top: 1px solid var(--line); }
 .wg-empty { padding: 8px 14px 12px; color: var(--text-3); font-size: var(--fs-sm); }
 
 /* ---------- микшер ---------- */

@@ -439,6 +439,9 @@ function main() {
   async function loadClips(selectPath) {
     const list = await call("list_clips", {}, "Не удалось прочитать папку клипов");
     S.clips = list;
+    // список мог измениться (удалили, обрезали, сохранили) — перестраиваем его всегда;
+    // готовые превью встают на место из памяти, без мигания
+    renderClipList();
     // новый повтор выделяем, только если пользователь сейчас ничего не смотрит и не режет
     if (!selectPath && S.pendingSelect && !S.playing && !S.busy && list.some((c) => samePath(c.path, S.pendingSelect))) {
       selectPath = S.pendingSelect;
@@ -449,9 +452,12 @@ function main() {
     if (next && S.clip && samePath(next.path, S.clip.path) && !selectPath) {
       // тот же клип: обновляем данные, не сбрасывая плеер (если файл не менялся)
       const changed = next.modified !== S.clip.modified || next.duration !== S.clip.duration;
-      S.clip = next;
+      // файл изменился (обрезка «с заменой») — открываем его заново: длина и отрезок другие
       if (changed) selectClip(next, true);
-      else renderClipList();
+      else {
+        S.clip = next;
+        markActiveClip();
+      }
     } else {
       selectClip(next, true);
     }
@@ -842,10 +848,11 @@ function main() {
       S.trackVol = {};
     }
     renderQuality();
-    // по умолчанию — последние 30 секунд: в повторе нужный момент обычно в конце
+    // клип открывается с начала или с последних 30 секунд — как выбрано в настройках
     if (!same || !fromReload) {
+      const last30 = !!(S.state && S.state.settings && S.state.settings.clipStart === "last30");
       S.outT = c.duration;
-      S.inT = Math.max(0, c.duration - 30);
+      S.inT = last30 ? Math.max(0, c.duration - 30) : 0;
       S.t = S.inT;
     }
     if (!c.demo) {
@@ -1796,6 +1803,8 @@ function main() {
     $("#set-rec-indicator").checked = s.recordIndicator;
     $("#set-mic-agc").checked = s.micAgc;
     $("#set-confirm-delete").checked = s.confirmDelete;
+    $("#set-game-folders").checked = s.gameFolders;
+    $("#set-clip-start").value = s.clipStart;
     $("#set-shot-clipboard").checked = s.screenshotClipboard;
     $("#set-rec-cursor").checked = s.recordCursor;
     $("#set-auto-clean").checked = s.autoClean;
@@ -1838,6 +1847,8 @@ function main() {
   $("#set-rec-indicator").addEventListener("change", (e) => saveSettings({ recordIndicator: e.target.checked }));
   $("#set-mic-agc").addEventListener("change", (e) => saveSettings({ micAgc: e.target.checked }));
   $("#set-confirm-delete").addEventListener("change", (e) => saveSettings({ confirmDelete: e.target.checked }));
+  $("#set-game-folders").addEventListener("change", (e) => saveSettings({ gameFolders: e.target.checked }));
+  $("#set-clip-start").addEventListener("change", (e) => saveSettings({ clipStart: e.target.value }));
   $("#set-shot-clipboard").addEventListener("change", (e) => saveSettings({ screenshotClipboard: e.target.checked }));
   $("#set-rec-cursor").addEventListener("change", (e) => saveSettings({ recordCursor: e.target.checked }));
 

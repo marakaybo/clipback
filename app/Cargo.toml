@@ -1,6 +1,6 @@
 [package]
 name = "clipback"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2021"
 description = "Clipback — запись последних минут экрана"
 license = "GPL-3.0-or-later"

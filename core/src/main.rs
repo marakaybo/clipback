@@ -112,7 +112,7 @@ fn real_main() -> Result<()> {
     // имя клипа — по окну, которое в фокусе в момент нажатия (обычно это игра)
     let save = move || {
         let label = clipback_core::util::foreground_window().and_then(|(t, _)| clipback_core::util::clip_label(&t));
-        let _ = tx.send(clipback_core::Command::Save { seconds: None, label });
+        let _ = tx.send(clipback_core::Command::Save { seconds: None, label, dir: None });
     };
 
     match hotkey::spawn(&args.hotkey, save.clone()) {
@@ -138,7 +138,7 @@ fn real_main() -> Result<()> {
         let tx = rec.sender();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs(secs));
-            let _ = tx.send(clipback_core::Command::Save { seconds: None, label: None });
+            let _ = tx.send(clipback_core::Command::Save { seconds: None, label: None, dir: None });
         });
     }
 

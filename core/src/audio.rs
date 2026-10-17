@@ -85,7 +85,7 @@ pub fn list_mics() -> Result<Vec<Device>> {
     }
 }
 
-unsafe fn device_id(d: &IMMDevice) -> Result<String> {
+pub(crate) unsafe fn device_id(d: &IMMDevice) -> Result<String> {
     let p = d.GetId()?;
     let s = p.to_string().unwrap_or_default();
     CoTaskMemFree(Some(p.0 as *const _));

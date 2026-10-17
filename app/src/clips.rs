@@ -116,12 +116,17 @@ pub fn entry(p: &Path) -> Result<ClipEntry> {
     Ok(e)
 }
 
-/// Все клипы в папке, новые сверху.
+/// Все клипы в папке и в папках игр внутри неё (один уровень), новые сверху.
 pub fn list(dir: &Path) -> Vec<ClipEntry> {
-    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
-    let mut v: Vec<ClipEntry> = rd
-        .flatten()
-        .map(|d| d.path())
+    let files = |d: &Path| -> Vec<PathBuf> {
+        std::fs::read_dir(d).map(|rd| rd.flatten().map(|e| e.path()).collect()).unwrap_or_default()
+    };
+    let top = files(dir);
+    let nested = top.iter().filter(|p| p.is_dir()).flat_map(|d| files(d));
+    let mut v: Vec<ClipEntry> = top
+        .iter()
+        .cloned()
+        .chain(nested)
         .filter(|p| p.is_file() && kind_of(p).is_some())
         .filter_map(|p| entry(&p).ok())
         .collect();
@@ -338,6 +343,23 @@ mod tests {
         let e = rename(&dir.join("a.png"), "новое имя").unwrap();
         assert_eq!(e.name, "новое имя");
         assert!(dir.join("новое имя.png").exists());
+    }
+
+    #[test]
+    fn list_includes_game_folders() {
+        let dir = std::env::temp_dir().join("clipback-app-test-folders");
+        let _ = std::fs::remove_dir_all(&dir);
+        let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01".to_vec();
+        save_image(&dir, "Корень", &png).unwrap();
+        save_image(&dir.join("Battlefield 6"), "Battlefield 6", &png).unwrap();
+        // глубже одного уровня не смотрим
+        save_image(&dir.join("a").join("b"), "Глубоко", &png).unwrap();
+        let names: Vec<String> = list(&dir).into_iter().map(|e| e.name).collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+        assert!(names.iter().any(|n| n.starts_with("Battlefield 6 ")));
+        let inside = dir.join("Battlefield 6");
+        let f = std::fs::read_dir(&inside).unwrap().next().unwrap().unwrap().path();
+        assert!(ensure_inside(&dir, &f).is_ok(), "клип из папки игры считается своим");
     }
 
     #[test]

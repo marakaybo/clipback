@@ -244,7 +244,8 @@ fn start_recording(app: &AppHandle) {
                     }
                     if std::mem::take(&mut i.record_after_start) {
                         let label = i.last_game.clone();
-                        let _ = rec.sender().send(Command::StartRecord { label });
+                        let dir = Some(util::clip_dir(&i.settings.out_dir, label.as_deref(), i.settings.game_folders));
+                        let _ = rec.sender().send(Command::StartRecord { label, dir });
                     }
                     i.recorder = Some(rec);
                 }
@@ -467,7 +468,8 @@ fn toggle_record(app: &AppHandle) {
     let label = current_game_label(app);
     let mut i = lock(app);
     if let Some(r) = &i.recorder {
-        let cmd = if i.record_started.is_some() { Command::StopRecord } else { Command::StartRecord { label } };
+        let dir = Some(util::clip_dir(&i.settings.out_dir, label.as_deref(), i.settings.game_folders));
+        let cmd = if i.record_started.is_some() { Command::StopRecord } else { Command::StartRecord { label, dir } };
         let _ = r.sender().send(cmd);
     } else if i.starting {
         i.record_after_start = !i.record_after_start;
@@ -496,7 +498,8 @@ fn save_replay(app: &AppHandle) {
     let i = lock(app);
     match &i.recorder {
         Some(r) => {
-            let _ = r.sender().send(Command::Save { seconds: None, label });
+            let dir = Some(util::clip_dir(&i.settings.out_dir, label.as_deref(), i.settings.game_folders));
+            let _ = r.sender().send(Command::Save { seconds: None, label, dir });
         }
         None => {
             drop(i);
@@ -506,13 +509,14 @@ fn save_replay(app: &AppHandle) {
 }
 
 fn take_screenshot(app: &AppHandle) -> Result<clips::ClipEntry, String> {
-    let label = current_game_label(app).unwrap_or_else(|| "Скриншот".into());
+    let game = current_game_label(app);
+    let label = game.clone().unwrap_or_else(|| "Скриншот".into());
     let (tx, rx) = mpsc::channel();
     let (dir, jpeg) = {
         let i = lock(app);
         let r = i.recorder.as_ref().ok_or("запись выключена — скриншот берётся из захвата экрана")?;
         r.sender().send(Command::Screenshot { reply: tx }).map_err(|e| e.to_string())?;
-        (i.settings.out_dir.clone(), i.settings.screenshot_format != "png")
+        (util::clip_dir(&i.settings.out_dir, game.as_deref(), i.settings.game_folders), i.settings.screenshot_format != "png")
     };
     let raw = rx.recv_timeout(Duration::from_secs(5)).map_err(|_| "захват не ответил".to_string())??;
     // сразу в буфер обмена — можно вставить в чат, не открывая Clipback
@@ -555,7 +559,6 @@ fn hide_overlay(app: &AppHandle) {
                 let _ = w.hide();
             }
             let _ = app.emit_to("overlay", "overlay-hidden", ());
-            widgets::overlay_hidden(&app);
         }
     });
 }
@@ -1194,8 +1197,11 @@ async fn copy_clip(app: AppHandle, path: String) -> Res<()> {
 async fn save_frame(app: AppHandle, png_base64: String, label: Option<String>, from: Option<String>) -> Res<clips::ClipEntry> {
     let data = base64::engine::general_purpose::STANDARD.decode(png_base64.as_bytes()).map_err(err)?;
     let label = label.and_then(|l| clips::clean_name(&l).ok()).unwrap_or_else(|| "Кадр".into());
-    let mut e = clips::save_image(&out_dir(&app), &label, &data).map_err(|e| format!("{e:#}"))?;
-    if let Some(src) = from.and_then(|f| checked_path(&app, &f).ok()) {
+    // кадр — рядом с клипом, из которого он взят (в той же папке игры)
+    let src = from.and_then(|f| checked_path(&app, &f).ok());
+    let dir = src.as_deref().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_else(|| out_dir(&app));
+    let mut e = clips::save_image(&dir, &label, &data).map_err(|e| format!("{e:#}"))?;
+    if let Some(src) = src {
         inherit_hidden(&app, &src, &mut e);
     }
     clips_changed(&app);
@@ -1548,6 +1554,9 @@ pub fn run() {
             widgets::set_volume_lock,
             widgets::set_master_volume,
             widgets::set_master_mute,
+            widgets::set_default_device,
+            widgets::set_mic_volume,
+            widgets::set_mic_mute,
             widgets::system_load,
         ])
         .build(tauri::generate_context!())

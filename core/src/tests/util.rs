@@ -30,3 +30,15 @@ fn stamp_looks_like_a_date() {
     assert_eq!(s.len(), 19);
     assert!(!s.contains(':'));
 }
+
+#[test]
+fn game_folders_inside_clip_folder() {
+    let out = std::path::Path::new(r"G:\Clips");
+    assert_eq!(clip_dir(out, Some("Battlefield 6"), true), out.join("Battlefield 6"));
+    assert_eq!(clip_dir(out, Some("Battlefield 6"), false), out);
+    assert_eq!(clip_dir(out, None, true), out);
+    assert_eq!(clip_dir(out, Some("  "), true), out);
+    // из имени папки убираются запрещённые символы — никакого выхода за пределы папки клипов
+    assert_eq!(clip_dir(out, Some(r"..\..\Windows"), true), out.join("....Windows"));
+    assert_eq!(clip_dir(out, Some("a:b?."), true), out.join("ab"));
+}

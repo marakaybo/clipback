@@ -68,7 +68,7 @@
     hotkeyOverlay: "Alt+Z", hotkeySave: "Alt+F10", hotkeyScreenshot: "Alt+F1", hotkeyRecord: "Alt+F9",
     systemAudio: true, mic: true, micDevice: null, micGain: 1, audioMode: "advanced", customBitrate: 12,
     appTracks: [{ name: "Discord", exe: "Discord.exe", enabled: true }],
-    recordOnStart: true, closeToTray: true, autostart: false, checkUpdates: true, screenshotFormat: "jpg", saveSound: true, recordIndicator: true, recordCursor: true, micAgc: true, confirmDelete: true, screenshotClipboard: true, autoClean: false, cleanMaxGb: 50, cleanMaxDays: 0,
+    recordOnStart: true, closeToTray: true, gameFolders: true, clipStart: "start", autostart: false, checkUpdates: true, screenshotFormat: "jpg", saveSound: true, recordIndicator: true, recordCursor: true, micAgc: true, confirmDelete: true, screenshotClipboard: true, autoClean: false, cleanMaxGb: 50, cleanMaxDays: 0,
   };
   const state = {
     recording: true, starting: false,
@@ -96,6 +96,15 @@
       { key: "discord.exe", name: "Discord", volume: 0.35, muted: false, active: true, locked: true },
       { key: "spotify.exe", name: "Spotify", volume: 0.5, muted: true, active: false, locked: false },
       { key: "@system", name: "Системные звуки", volume: 1, muted: false, active: false, locked: false },
+    ],
+    outputs: [
+      { id: "out1", name: "Динамики (Logitech PRO X Gaming Headset)", isDefault: true },
+      { id: "out2", name: "Динамики (Realtek(R) Audio)", isDefault: false },
+    ],
+    mic: { name: "Микрофон (fifine Microphone)", volume: 0.27, muted: false },
+    mics: [
+      { id: "mic1", name: "Микрофон (fifine Microphone)", isDefault: true },
+      { id: "mic2", name: "Микрофон (Logitech PRO X)", isDefault: false },
     ],
   };
   const app = (key) => mixer.apps.find((a) => a.key === key);
@@ -222,11 +231,26 @@
     set_volume_lock: ({ key, volume, on }) => { Object.assign(app(key), { locked: on, volume }); },
     set_master_volume: ({ volume }) => { mixer.master = volume; },
     set_master_mute: ({ muted }) => { mixer.masterMuted = muted; },
+    set_default_device: ({ id }) => {
+      for (const list of [mixer.outputs, mixer.mics]) {
+        const d = list.find((x) => x.id === id);
+        if (!d) continue;
+        list.forEach((x) => (x.isDefault = x === d));
+        if (list === mixer.outputs) mixer.device = d.name;
+        else mixer.mic.name = d.name;
+      }
+    },
+    set_mic_volume: ({ volume }) => { mixer.mic.volume = volume; },
+    set_mic_mute: ({ muted }) => { mixer.mic.muted = muted; },
     system_load: () => {
       load.cpu = walk(load.cpu, 8, 95, 14);
       load.gpu = walk(load.gpu, 40, 99, 12);
       load.vram = walk(load.vram, 5.5 * 1024 ** 3, 9 * 1024 ** 3, 0.3 * 1024 ** 3);
-      return { cpu: load.cpu, gpu: load.gpu, vramUsed: load.vram, vramTotal: 15.7 * 1024 ** 3, ramUsed: 16.3 * 1024 ** 3, ramTotal: 31.8 * 1024 ** 3, gpuName: "NVIDIA GeForce RTX 5060 Ti", gpuTemp: Math.round(60 + load.gpu / 12) };
+      // как в приложении: история за последние 2 минуты
+      (load.hc = load.hc || []).push(load.cpu);
+      (load.hg = load.hg || []).push(load.gpu);
+      if (load.hc.length > 120) (load.hc.shift(), load.hg.shift());
+      return { cpuHistory: load.hc, gpuHistory: load.hg, cpu: load.cpu, gpu: load.gpu, vramUsed: load.vram, vramTotal: 15.7 * 1024 ** 3, ramUsed: 16.3 * 1024 ** 3, ramTotal: 31.8 * 1024 ** 3, gpuName: "NVIDIA GeForce RTX 5060 Ti", gpuTemp: Math.round(60 + load.gpu / 12) };
     },
     set_settings: ({ settings: s }) => { Object.assign(settings, s); emit("state", state); return settings; },
     pick_folder: () => null,

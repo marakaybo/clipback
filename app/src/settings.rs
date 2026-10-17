@@ -93,6 +93,10 @@ pub struct Settings {
     pub clean_max_days: u32,
     /// Замки громкости приложений (микшер в оверлее).
     pub volume_locks: Vec<VolumeLock>,
+    /// Новые клипы и скриншоты — в папку своей игры внутри папки клипов (как у NVIDIA).
+    pub game_folders: bool,
+    /// С чего открывается клип в редакторе: "start" — с начала, "last30" — последние 30 с.
+    pub clip_start: String,
 }
 
 impl Default for Settings {
@@ -130,6 +134,8 @@ impl Default for Settings {
             clean_max_gb: 50,
             clean_max_days: 0,
             volume_locks: Vec::new(),
+            game_folders: true,
+            clip_start: "start".into(),
         }
     }
 }
@@ -189,6 +195,9 @@ impl Settings {
         self.buffer_minutes = self.buffer_minutes.clamp(0.25, 30.0);
         if ![30, 60, 120].contains(&self.fps) {
             self.fps = d.fps;
+        }
+        if !["start", "last30"].contains(&self.clip_start.as_str()) {
+            self.clip_start = d.clip_start.clone();
         }
         if !["low", "medium", "high", "custom"].contains(&self.quality.as_str()) {
             self.quality = d.quality;

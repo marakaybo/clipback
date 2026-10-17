@@ -53,12 +53,13 @@ impl Default for Config {
 pub enum Command {
     /// Сохранить последние `seconds` секунд (None — весь буфер).
     /// `label` — начало имени файла (обычно название игры).
-    Save { seconds: Option<u32>, label: Option<String> },
+    /// `dir` — куда сохранить (None — папка клипов из настроек).
+    Save { seconds: Option<u32>, label: Option<String>, dir: Option<PathBuf> },
     SetBufferLength(u32),
     /// PNG текущего кадра экрана.
     Screenshot { reply: Sender<Result<crate::shot::RawImage, String>> },
     /// Начать полноценную запись в файл (с последнего ключевого кадра буфера).
-    StartRecord { label: Option<String> },
+    StartRecord { label: Option<String>, dir: Option<PathBuf> },
     StopRecord,
     Stop,
 }
@@ -116,7 +117,7 @@ impl Recorder {
     }
 
     pub fn save(&self, seconds: Option<u32>, label: Option<String>) {
-        let _ = self.tx.send(Command::Save { seconds, label });
+        let _ = self.tx.send(Command::Save { seconds, label, dir: None });
     }
 }
 
@@ -277,10 +278,12 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
                     }
                     return Ok(());
                 }
-                Command::StartRecord { label } => {
+                Command::StartRecord { label, dir } => {
                     if live.is_none() {
                         let base = format!("{} {}", label.as_deref().unwrap_or("Запись"), crate::util::file_stamp());
-                        let path = crate::util::unique_path(&cfg.out_dir, &base, "mp4");
+                        let dir = dir.unwrap_or_else(|| cfg.out_dir.clone());
+                        let _ = std::fs::create_dir_all(&dir);
+                        let path = crate::util::unique_path(&dir, &base, "mp4");
                         let snap = ring.since_last_key();
                         let ev = events.clone();
                         let done: crate::live::Done = Box::new(move |r| {
@@ -308,12 +311,14 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
                     };
                     let _ = reply.send(r);
                 }
-                Command::Save { seconds, label } => {
+                Command::Save { seconds, label, dir } => {
                     let snap = ring.snapshot_all(seconds);
                     let silence = silence.clone();
                     let names = track_list.clone();
                     let base = format!("{} {}", label.as_deref().unwrap_or("Clipback"), crate::util::file_stamp());
-                    let path = crate::util::unique_path(&cfg.out_dir, &base, "mp4");
+                    let dir = dir.unwrap_or_else(|| cfg.out_dir.clone());
+                    let _ = std::fs::create_dir_all(&dir);
+                    let path = crate::util::unique_path(&dir, &base, "mp4");
                     let frame_secs = 1.0 / fps as f64;
                     let ev = events.clone();
                     // запись идёт в отдельном потоке — захват не прерывается

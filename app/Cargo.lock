@@ -509,7 +509,7 @@ dependencies = [
 
 [[package]]
 name = "clipback"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -531,7 +531,7 @@ dependencies = [
 
 [[package]]
 name = "clipback-core"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "anyhow",
  "bytes",

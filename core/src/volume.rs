@@ -49,6 +49,92 @@ pub struct MixerState {
     pub master: f32,
     pub master_muted: bool,
     pub apps: Vec<AppVolume>,
+    /// Устройства вывода (наушники, динамики) — какое сейчас по умолчанию.
+    pub outputs: Vec<Endpoint>,
+    /// Микрофон по умолчанию (None — микрофонов нет) и все микрофоны.
+    pub mic: Option<MicState>,
+    pub mics: Vec<Endpoint>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Endpoint {
+    pub id: String,
+    pub name: String,
+    pub is_default: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MicState {
+    pub name: String,
+    pub volume: f32,
+    pub muted: bool,
+}
+
+unsafe fn enumerator() -> Result<IMMDeviceEnumerator> {
+    let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    Ok(CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?)
+}
+
+/// Включённые устройства вывода или записи и какое из них по умолчанию.
+unsafe fn endpoints(flow: EDataFlow) -> Result<Vec<Endpoint>> {
+    let en = enumerator()?;
+    let def = en.GetDefaultAudioEndpoint(flow, eConsole).ok().and_then(|d| crate::audio::device_id(&d).ok());
+    let col = en.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE)?;
+    let mut out = Vec::new();
+    for i in 0..col.GetCount()? {
+        let d = col.Item(i)?;
+        let id = crate::audio::device_id(&d)?;
+        out.push(Endpoint { name: crate::audio::device_name(&d), is_default: def.as_deref() == Some(id.as_str()), id });
+    }
+    out.sort_by_key(|e| e.name.to_lowercase());
+    Ok(out)
+}
+
+unsafe fn default_mic() -> Result<IMMDevice> {
+    enumerator()?.GetDefaultAudioEndpoint(eCapture, eConsole).context("нет микрофона")
+}
+
+/// Сделать устройство (вывода или записи) устройством по умолчанию — для всех ролей, как
+/// переключатель в Xbox Game Bar. У Windows для этого нет открытого API: используется
+/// `IPolicyConfig` (тот же, что у EarTrumpet и SoundSwitch), метод `SetDefaultEndpoint` —
+/// 11-й после трёх методов IUnknown.
+pub fn set_default_device(id: &str) -> Result<()> {
+    use std::ffi::c_void;
+    use windows::core::{IUnknown, HRESULT, HSTRING};
+    const CLSID_POLICY_CONFIG: GUID = GUID::from_u128(0x870a_f99c_171d_4f9e_af0d_e63d_f40c_2bc9);
+    const IID_POLICY_CONFIG: GUID = GUID::from_u128(0xf867_9f50_850a_41cf_9c72_430f_2902_90c8);
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let unk: IUnknown = CoCreateInstance(&CLSID_POLICY_CONFIG, None, CLSCTX_ALL).context("переключение устройств недоступно")?;
+        let mut p: *mut c_void = std::ptr::null_mut();
+        unk.query(&IID_POLICY_CONFIG, &mut p).ok().context("переключение устройств недоступно")?;
+        let pc = IUnknown::from_raw(p); // освободится при выходе
+        let vtbl = *(pc.as_raw() as *const *const usize);
+        let set: unsafe extern "system" fn(*mut c_void, PCWSTR, i32) -> HRESULT = std::mem::transmute(*vtbl.add(13));
+        let wid = HSTRING::from(id);
+        for role in [eConsole, eMultimedia, eCommunications] {
+            set(pc.as_raw(), PCWSTR(wid.as_ptr()), role.0).ok().context("Windows не переключила устройство")?;
+        }
+        Ok(())
+    }
+}
+
+pub fn set_mic_volume(volume: f32) -> Result<()> {
+    unsafe {
+        let ep: IAudioEndpointVolume = default_mic()?.Activate(CLSCTX_ALL, None)?;
+        ep.SetMasterVolumeLevelScalar(volume.clamp(0.0, 1.0), &OUR_CONTEXT)?;
+        Ok(())
+    }
+}
+
+pub fn set_mic_mute(muted: bool) -> Result<()> {
+    unsafe {
+        let ep: IAudioEndpointVolume = default_mic()?.Activate(CLSCTX_ALL, None)?;
+        ep.SetMute(muted, &OUR_CONTEXT)?;
+        Ok(())
+    }
 }
 
 struct Session {
@@ -181,11 +267,22 @@ pub fn mixer_state() -> Result<MixerState> {
             apps.push(AppVolume { key: s.key, name, volume, muted, active: s.active });
         }
         sort_apps(&mut apps);
+        let mic = default_mic().ok().and_then(|d| {
+            let v: IAudioEndpointVolume = d.Activate(CLSCTX_ALL, None).ok()?;
+            Some(MicState {
+                name: crate::audio::device_name(&d),
+                volume: v.GetMasterVolumeLevelScalar().unwrap_or(1.0),
+                muted: v.GetMute().map(|b| b.as_bool()).unwrap_or(false),
+            })
+        });
         Ok(MixerState {
             device: crate::audio::device_name(&dev),
             master: ep.GetMasterVolumeLevelScalar().unwrap_or(1.0),
             master_muted: ep.GetMute().map(|b| b.as_bool()).unwrap_or(false),
             apps,
+            outputs: endpoints(eRender).unwrap_or_default(),
+            mic,
+            mics: endpoints(eCapture).unwrap_or_default(),
         })
     }
 }
@@ -491,6 +588,24 @@ mod tests {
         println!("{}: {:.0}% {}", m.device, m.master * 100.0, if m.master_muted { "(без звука)" } else { "" });
         for a in m.apps {
             println!("  {:<28} {:<24} {:>4.0}% {} {}", a.name, a.key, a.volume * 100.0, if a.muted { "без звука" } else { "" }, if a.active { "играет" } else { "" });
+        }        for o in &m.outputs {
+            println!("вывод: {}{}", o.name, if o.is_default { "  ← по умолчанию" } else { "" });
+        }
+        if let Some(mic) = &m.mic {
+            println!("микрофон: {} {:.0}% {}", mic.name, mic.volume * 100.0, if mic.muted { "(без звука)" } else { "" });
+        }
+        for o in &m.mics {
+            println!("микрофон в списке: {}{}", o.name, if o.is_default { "  ← по умолчанию" } else { "" });
+        }
+        // переключатель устройств есть в этой Windows (сам ничего не переключаем)
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let unk: windows::core::IUnknown =
+                CoCreateInstance(&GUID::from_u128(0x870a_f99c_171d_4f9e_af0d_e63d_f40c_2bc9), None, CLSCTX_ALL).unwrap();
+            let mut p = std::ptr::null_mut();
+            assert!(unk.query(&GUID::from_u128(0xf867_9f50_850a_41cf_9c72_430f_2902_90c8), &mut p).is_ok());
+            drop(windows::core::IUnknown::from_raw(p));
+            println!("IPolicyConfig: есть");
         }
     }
 

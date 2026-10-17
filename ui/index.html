@@ -480,7 +480,10 @@
             <div><b>Сохранять в</b><small class="mono path" id="set-outdir"></small></div>
             <div class="row-btns"><button class="btn btn-ghost" id="set-outdir-open">Открыть</button><button class="btn btn-ghost" id="set-outdir-pick">Изменить</button></div>
           </div>
-          <div class="opt"><div><b>Имена файлов</b><small>Название игры и время: «Battlefield 6 2026-10-15 21-48-03»</small></div></div>
+          <div class="opt">
+            <div><b>Папка для каждой игры</b><small>Клипы\Battlefield 6\…</small></div>
+            <label class="switch"><input type="checkbox" id="set-game-folders"><span></span></label>
+          </div>
           <h3>Автоочистка</h3>
           <div class="opt">
             <div><b>Убирать старые клипы</b><small>Старые клипы уходят в корзину, избранное не трогается</small></div>
@@ -540,6 +543,13 @@
           <div class="opt">
             <div><b>Звук при сохранении</b><small>Щелчок при сохранении и записи</small></div>
             <label class="switch"><input type="checkbox" id="set-save-sound"><span></span></label>
+          </div>
+          <div class="opt">
+            <div><b>Открывать клип</b></div>
+            <select id="set-clip-start">
+              <option value="start">С начала</option>
+              <option value="last30">С последних 30 с</option>
+            </select>
           </div>
           <div class="opt">
             <div><b>Спрашивать перед удалением</b><small>Можно вернуть из корзины Windows</small></div>
