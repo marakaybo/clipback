@@ -18,6 +18,23 @@ impl Default for AppTrack {
     }
 }
 
+/// «Замок» громкости приложения в микшере оверлея: Clipback держит этот уровень.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct VolumeLock {
+    /// Ключ приложения: «discord.exe» (маленькими буквами) или «@system».
+    pub key: String,
+    pub name: String,
+    /// 0..1
+    pub volume: f32,
+}
+
+impl Default for VolumeLock {
+    fn default() -> Self {
+        Self { key: String::new(), name: String::new(), volume: 1.0 }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
@@ -74,6 +91,8 @@ pub struct Settings {
     pub clean_max_gb: u32,
     /// Убирать клипы старше стольких дней (0 — не смотреть на возраст).
     pub clean_max_days: u32,
+    /// Замки громкости приложений (микшер в оверлее).
+    pub volume_locks: Vec<VolumeLock>,
 }
 
 impl Default for Settings {
@@ -110,6 +129,7 @@ impl Default for Settings {
             auto_clean: false,
             clean_max_gb: 50,
             clean_max_days: 0,
+            volume_locks: Vec::new(),
         }
     }
 }
@@ -153,6 +173,16 @@ impl Settings {
         }
         self.app_tracks.retain(|a| !a.exe.trim().is_empty());
         self.app_tracks.truncate(8);
+        let mut seen = std::collections::HashSet::new();
+        self.volume_locks.retain_mut(|l| {
+            l.key = l.key.trim().to_lowercase();
+            if !l.volume.is_finite() {
+                l.volume = 1.0;
+            }
+            l.volume = l.volume.clamp(0.0, 1.0);
+            !l.key.is_empty() && seen.insert(l.key.clone())
+        });
+        self.volume_locks.truncate(32);
         if !self.buffer_minutes.is_finite() || self.buffer_minutes <= 0.0 {
             self.buffer_minutes = d.buffer_minutes;
         }
@@ -337,6 +367,16 @@ mod audio_tests {
         assert_eq!(a.apps.len(), 1);
         assert_eq!(a.apps[0].exe, "Discord.exe");
         assert!(a.mic);
+    }
+
+    #[test]
+    fn volume_locks_are_cleaned() {
+        let lock = |key: &str, volume: f32| VolumeLock { key: key.into(), name: key.into(), volume };
+        let s = Settings { volume_locks: vec![lock("Discord.exe", 0.4), lock("discord.exe", 0.9), lock(" ", 0.5), lock("x.exe", f32::NAN), lock("y.exe", 7.0)], ..Settings::default() }.sanitized();
+        let got: Vec<_> = s.volume_locks.iter().map(|l| (l.key.as_str(), l.volume)).collect();
+        assert_eq!(got, [("discord.exe", 0.4), ("x.exe", 1.0), ("y.exe", 1.0)]);
+        let old: Settings = serde_json::from_str(r#"{"fps": 30}"#).unwrap();
+        assert!(old.volume_locks.is_empty(), "старые настройки без замков читаются");
     }
 
     #[test]

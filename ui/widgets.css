@@ -1,0 +1,96 @@
+/*
+  Виджеты оверлея (widgets.js): микшер громкости и нагрузка компьютера.
+  Колонка слева от окна Clipback; вместе они стоят по центру экрана.
+  На узком экране (меньше 1480 px) колонки нет — окну Clipback нужно место.
+*/
+:root {
+  --wg-w: 300px;
+  --wg-span: calc(var(--wg-w) + 10px);
+  --wg-app-w: min(1500px, calc(88vw - var(--wg-span)));
+  --wg-app-h: min(900px, 88vh);
+  --wg-left: calc((100vw - var(--wg-app-w) - var(--wg-span)) / 2);
+}
+
+.widgets { display: none; }
+
+@media (min-width: 1480px) {
+  html[data-mode="overlay"] .app,
+  html[data-mode="browser"] .app { left: calc(var(--wg-left) + var(--wg-span)); right: var(--wg-left); max-width: none; }
+
+  html[data-mode="overlay"] .widgets,
+  html[data-mode="browser"] .widgets {
+    display: flex; flex-direction: column; gap: 8px;
+    position: fixed; left: var(--wg-left); top: calc((100vh - var(--wg-app-h)) / 2);
+    width: var(--wg-w); max-height: var(--wg-app-h);
+    padding: 10px;
+    background: rgba(17, 18, 20, 0.94);
+    border: 1px solid var(--line); border-radius: 12px;
+    box-shadow: 0 24px 80px rgba(0, 0, 0, 0.55);
+    opacity: 0; transform: translateY(10px) scale(0.985);
+    transition: opacity .18s ease, transform .24s cubic-bezier(.2, .8, .2, 1);
+    pointer-events: none;
+  }
+  html.overlay-open .widgets { opacity: 1; transform: none; pointer-events: auto; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .widgets { transform: none !important; transition: opacity .12s ease !important; }
+}
+
+.wg { display: flex; flex-direction: column; min-height: 0; flex: none; }
+#wg-mixer { flex: 0 1 auto; }
+.wg-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  height: 40px; padding: 0 12px 0 14px; flex: none; font-weight: 600;
+}
+.wg-sub {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-weight: 400; font-size: var(--fs-xs); color: var(--text-3);
+}
+.wg-empty { padding: 8px 14px 12px; color: var(--text-3); font-size: var(--fs-sm); }
+
+/* ---------- микшер ---------- */
+.icon-btn.xs { width: 28px; height: 28px; }
+.icon-btn.xs svg { width: 15px; height: 15px; }
+
+.mx-row {
+  display: grid; grid-template-columns: 28px minmax(0, 1fr) 28px; align-items: center; gap: 6px;
+  padding: 4px 6px;
+}
+.mx-master { grid-template-columns: 28px minmax(0, 1fr); padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.mx-list { overflow-y: auto; min-height: 0; padding: 4px 0 6px; }
+.mx-body { min-width: 0; }
+.mx-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: var(--fs-sm); }
+.mx-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mx-val { color: var(--text-3); font-size: var(--fs-xs); }
+.mx-row.idle .mx-name { color: var(--text-2); }
+
+.mx-row input[type=range] {
+  display: block; width: 100%; margin: 7px 0 4px;
+  background: linear-gradient(to right, var(--text-2) var(--v, 0%), var(--s4) var(--v, 0%));
+}
+.mx-row.locked input[type=range] { background: linear-gradient(to right, var(--accent) var(--v, 0%), var(--s4) var(--v, 0%)); }
+.mx-row.locked input[type=range]::-webkit-slider-thumb { background: var(--accent-text); }
+.mx-row.muted-app .mx-name, .mx-row.muted-app .mx-val { color: var(--text-3); }
+.mx-row.muted-app input[type=range] { background: linear-gradient(to right, var(--text-3) var(--v, 0%), var(--s4) var(--v, 0%)); }
+.mx-row.muted-app .mx-mute { color: var(--rec); }
+
+.mx-lock { opacity: .4; }
+.mx-row:hover .mx-lock, .mx-lock:focus-visible { opacity: 1; }
+.mx-row.locked .mx-lock { opacity: 1; color: var(--accent); }
+
+/* ---------- нагрузка ---------- */
+.ld-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 0 10px 10px; }
+.ld-tile { min-width: 0; padding: 8px 10px 9px; border-radius: var(--r); background: rgba(255, 255, 255, 0.035); }
+.ld-tile.wide { grid-column: 1 / -1; }
+.ld-top { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; }
+.ld-label { font-size: var(--fs-xs); color: var(--text-3); white-space: nowrap; }
+.ld-val { font-size: var(--fs); color: var(--text); white-space: nowrap; }
+.ld-val small { font-size: var(--fs-xs); color: var(--text-3); }
+.ld-spark { display: block; width: 100%; height: 22px; margin-top: 4px; }
+.ld-spark polyline { fill: none; stroke: var(--accent); stroke-width: 1.5; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+.ld-bar { height: 3px; margin-top: 6px; border-radius: 2px; background: var(--s4); overflow: hidden; }
+.ld-bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .4s ease; }
+.ld-val small.warm { color: var(--warn); }
+.ld-tile.hot .ld-bar i { background: var(--warn); }
+.ld-tile.hot .ld-spark polyline { stroke: var(--warn); }
+.ld-tile.na .ld-val { color: var(--text-3); }

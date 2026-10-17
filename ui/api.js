@@ -87,6 +87,25 @@
   }, 2000);
 
   const find = (path) => clips.find((c) => c.path === path);
+
+  // микшер оверлея: Discord сам возвращает себе 100 % каждые 6 с — замок это держит
+  const mixer = {
+    device: "Динамики (Logitech PRO X Gaming Headset)", master: 0.64, masterMuted: false,
+    apps: [
+      { key: "bf6.exe", name: "Battlefield™ 6", volume: 0.8, muted: false, active: true, locked: false },
+      { key: "discord.exe", name: "Discord", volume: 0.35, muted: false, active: true, locked: true },
+      { key: "spotify.exe", name: "Spotify", volume: 0.5, muted: true, active: false, locked: false },
+      { key: "@system", name: "Системные звуки", volume: 1, muted: false, active: false, locked: false },
+    ],
+  };
+  const app = (key) => mixer.apps.find((a) => a.key === key);
+  setInterval(() => {
+    const d = app("discord.exe");
+    if (!d.locked) d.volume = 1;
+  }, 6000);
+  // нагрузка: плавное случайное блуждание
+  const load = { cpu: 34, gpu: 88, vram: 7.1 * 1024 ** 3 };
+  const walk = (v, lo, hi, step) => Math.min(hi, Math.max(lo, v + (Math.random() - 0.5) * step));
   const trashBin = {};
   let trashSeq = 0;
 
@@ -196,6 +215,18 @@
       clips.push(c);
       emit("clips-changed");
       return c;
+    },
+    mixer_state: () => JSON.parse(JSON.stringify(mixer)),
+    set_app_volume: ({ key, volume }) => { app(key).volume = volume; },
+    set_app_mute: ({ key, muted }) => { app(key).muted = muted; },
+    set_volume_lock: ({ key, volume, on }) => { Object.assign(app(key), { locked: on, volume }); },
+    set_master_volume: ({ volume }) => { mixer.master = volume; },
+    set_master_mute: ({ muted }) => { mixer.masterMuted = muted; },
+    system_load: () => {
+      load.cpu = walk(load.cpu, 8, 95, 14);
+      load.gpu = walk(load.gpu, 40, 99, 12);
+      load.vram = walk(load.vram, 5.5 * 1024 ** 3, 9 * 1024 ** 3, 0.3 * 1024 ** 3);
+      return { cpu: load.cpu, gpu: load.gpu, vramUsed: load.vram, vramTotal: 15.7 * 1024 ** 3, ramUsed: 16.3 * 1024 ** 3, ramTotal: 31.8 * 1024 ** 3, gpuName: "NVIDIA GeForce RTX 5060 Ti", gpuTemp: Math.round(60 + load.gpu / 12) };
     },
     set_settings: ({ settings: s }) => { Object.assign(settings, s); emit("state", state); return settings; },
     pick_folder: () => null,

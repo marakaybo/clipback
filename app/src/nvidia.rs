@@ -139,28 +139,81 @@ fn check(r: i32, what: &str) -> Result<(), Error> {
     }
 }
 
+type QueryInterface = unsafe extern "C" fn(u32) -> *mut c_void;
+
+/// `nvapi_QueryInterface` из драйвера после NvAPI_Initialize; None — драйвера NVIDIA нет.
+fn nvapi() -> Option<QueryInterface> {
+    use windows::core::{s, w};
+    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    unsafe {
+        let lib = LoadLibraryW(w!("nvapi64.dll")).ok()?;
+        let qi = GetProcAddress(lib, s!("nvapi_QueryInterface"))?;
+        let qi = std::mem::transmute_copy::<_, QueryInterface>(&qi);
+        let init: Fn0 = func(qi, 0x0150_E828).ok()?;
+        (init() == NVAPI_OK).then_some(qi)
+    }
+}
+
+/// Функция NVAPI по номеру; нулевой адрес — такой функции нет в этом драйвере.
+fn func<F: Copy>(qi: QueryInterface, id: u32) -> Result<F, Error> {
+    assert_eq!(std::mem::size_of::<F>(), std::mem::size_of::<*mut c_void>());
+    let p = unsafe { qi(id) };
+    if p.is_null() {
+        return Err(Error::Failed(format!("в драйвере нет функции NVAPI 0x{id:08X}")));
+    }
+    // F — указатель на функцию той же сигнатуры, что в nvapi.h
+    Ok(unsafe { std::mem::transmute_copy::<*mut c_void, F>(&p) })
+}
+
+/// NV_GPU_THERMAL_SETTINGS_V2
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct ThermalSensor {
+    controller: i32,
+    default_min: i32,
+    default_max: i32,
+    current: i32,
+    target: i32,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct ThermalSettings {
+    version: u32,
+    count: u32,
+    sensor: [ThermalSensor; 3],
+}
+
+/// Температура первой видеокарты NVIDIA, °C. Прав администратора не нужно;
+/// None — карта не NVIDIA или драйвер не ответил.
+pub fn gpu_temperature() -> Option<i32> {
+    type EnumGpus = unsafe extern "C" fn(*mut [Handle; 64], *mut u32) -> i32;
+    type GetThermal = unsafe extern "C" fn(Handle, u32, *mut ThermalSettings) -> i32;
+    static API: std::sync::OnceLock<Option<(EnumGpus, GetThermal)>> = std::sync::OnceLock::new();
+    let (enum_gpus, get_thermal) = (*API.get_or_init(|| {
+        let qi = nvapi()?;
+        Some((func(qi, 0xE5AC_921F).ok()?, func(qi, 0xE364_0A56).ok()?))
+    }))?;
+    unsafe {
+        let mut gpus = [std::ptr::null_mut(); 64];
+        let mut n = 0u32;
+        if enum_gpus(&mut gpus, &mut n) != NVAPI_OK || n == 0 {
+            return None;
+        }
+        let mut t = ThermalSettings { version: ver::<ThermalSettings>(2), ..Default::default() };
+        // 15 — NVAPI_THERMAL_TARGET_ALL
+        if get_thermal(gpus[0], 15, &mut t) != NVAPI_OK {
+            return None;
+        }
+        // датчик 1 — сам графический процессор (NVAPI_THERMAL_TARGET_GPU)
+        t.sensor.iter().take(t.count.min(3) as usize).find(|s| s.target == 1).or(t.sensor.first()).map(|s| s.current).filter(|c| (1..150).contains(c))
+    }
+}
+
 impl Drs {
     fn open() -> Result<Self, Error> {
-        use windows::core::{s, w};
-        use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
         unsafe {
-            let lib = LoadLibraryW(w!("nvapi64.dll")).map_err(|_| Error::NoNvidia)?;
-            let qi = GetProcAddress(lib, s!("nvapi_QueryInterface")).ok_or(Error::NoNvidia)?;
-            let qi = std::mem::transmute_copy::<_, unsafe extern "C" fn(u32) -> *mut c_void>(&qi);
-            // функция NVAPI по номеру; нулевой адрес — такой функции нет в этом драйвере
-            fn func<F: Copy>(qi: unsafe extern "C" fn(u32) -> *mut c_void, id: u32) -> Result<F, Error> {
-                assert_eq!(std::mem::size_of::<F>(), std::mem::size_of::<*mut c_void>());
-                let p = unsafe { qi(id) };
-                if p.is_null() {
-                    return Err(Error::Failed(format!("в драйвере нет функции NVAPI 0x{id:08X}")));
-                }
-                // F — указатель на функцию той же сигнатуры, что в nvapi.h
-                Ok(unsafe { std::mem::transmute_copy::<*mut c_void, F>(&p) })
-            }
-            let init: Fn0 = func(qi, 0x0150_E828)?;
-            if init() != NVAPI_OK {
-                return Err(Error::NoNvidia);
-            }
+            let qi = nvapi().ok_or(Error::NoNvidia)?;
             let create: FnPH = func(qi, 0x0694_D52E)?;
             let load: FnH = func(qi, 0x375D_BD6B)?;
             let mut session: Handle = std::ptr::null_mut();
@@ -324,6 +377,15 @@ mod tests {
         assert_eq!(ver::<Setting>(1), 0x0001_3020);
         assert_eq!(std::mem::size_of::<Application>(), 4 + 4 + 4 * 4096 + 4 + 4096);
         assert_eq!(ver::<Profile>(1), 0x0001_1014);
+        // NV_GPU_THERMAL_SETTINGS_VER_2 = MAKE_NVAPI_VERSION(NV_GPU_THERMAL_SETTINGS_V2, 2), sizeof 68
+        assert_eq!(ver::<ThermalSettings>(2), 0x0002_0044);
+    }
+
+    /// Температура видеокарты без прав администратора (на компьютере без NVIDIA — None).
+    #[test]
+    #[ignore]
+    fn read_gpu_temperature() {
+        println!("температура видеокарты: {:?}", gpu_temperature());
     }
 
     /// Только чтение: какой метод вывода драйвер применит к javaw.exe (Minecraft).

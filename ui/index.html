@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Clipback</title>
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="widgets.css">
   <script>
     // режим задаёт приложение: window | overlay | toast; в обычном браузере — демо
     document.documentElement.dataset.mode = window.__CLIPBACK_MODE__ || "browser";
@@ -26,6 +27,9 @@
   </div>
 
   <div class="backdrop" id="backdrop"></div>
+
+  <!-- Оверлей: микшер громкости и нагрузка компьютера (widgets.js) -->
+  <aside class="widgets" id="widgets"></aside>
 
   <div class="app" id="app">
     <header class="topbar panel">
@@ -573,5 +577,6 @@
   <textarea class="ed-text" id="ed-text" rows="1" spellcheck="false" hidden></textarea>
   <script src="app.js"></script>
   <script src="editor.js"></script>
+  <script src="widgets.js"></script>
 </body>
 </html>

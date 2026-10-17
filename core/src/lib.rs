@@ -20,6 +20,8 @@ pub mod recorder;
 pub mod mixer;
 pub mod ring;
 pub mod shot;
+pub mod sysload;
 pub mod util;
+pub mod volume;
 
 pub use recorder::{Command, Config, Event, Recorder};
