@@ -57,7 +57,7 @@ impl Ring {
         for q in &mut self.audio {
             while q.front().is_some_and(|p| audio_time(p.pos) < keep_from) {
                 let p = q.pop_front().unwrap();
-                self.bytes -= p.data.len();
+                self.bytes = self.bytes.saturating_sub(p.data.len());
             }
         }
     }
@@ -92,11 +92,11 @@ impl Ring {
 
     fn pop_group(&mut self) {
         if let Some(p) = self.packets.pop_front() {
-            self.bytes -= p.data.len();
+            self.bytes = self.bytes.saturating_sub(p.data.len());
         }
         while self.packets.front().is_some_and(|p| !p.key) {
             let p = self.packets.pop_front().unwrap();
-            self.bytes -= p.data.len();
+            self.bytes = self.bytes.saturating_sub(p.data.len());
         }
     }
 

@@ -143,15 +143,14 @@ unsafe fn read_format(p: *const WAVEFORMATEX) -> Result<(Fmt, u32, usize, usize)
 
 /// Перевод одного кадра устройства в стерео (L, R); 5.1/7.1 сводится в стерео.
 fn frame_to_stereo(fmt: Fmt, data: &[u8], ch: usize) -> (f32, f32) {
+    // кадр короче, чем обещает формат (странный драйвер), — тишина, а не паника в потоке звука
     let s = |i: usize| -> f32 {
+        let get = |n: usize| data.get(i * n..i * n + n);
         match fmt {
-            Fmt::F32 => f32::from_le_bytes(data[i * 4..i * 4 + 4].try_into().unwrap()),
-            Fmt::I16 => i16::from_le_bytes(data[i * 2..i * 2 + 2].try_into().unwrap()) as f32 / 32768.0,
-            Fmt::I24 => {
-                let b = &data[i * 3..i * 3 + 3];
-                (((b[2] as i32) << 24 | (b[1] as i32) << 16 | (b[0] as i32) << 8) >> 8) as f32 / 8_388_608.0
-            }
-            Fmt::I32 => i32::from_le_bytes(data[i * 4..i * 4 + 4].try_into().unwrap()) as f32 / 2_147_483_648.0,
+            Fmt::F32 => get(4).map_or(0.0, |b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])),
+            Fmt::I16 => get(2).map_or(0.0, |b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0),
+            Fmt::I24 => get(3).map_or(0.0, |b| (((b[2] as i32) << 24 | (b[1] as i32) << 16 | (b[0] as i32) << 8) >> 8) as f32 / 8_388_608.0),
+            Fmt::I32 => get(4).map_or(0.0, |b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32 / 2_147_483_648.0),
         }
     };
     match ch {
