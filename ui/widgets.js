@@ -258,17 +258,20 @@
   // ---------- раз в секунду, пока оверлей открыт ----------
   let open = false;
   let timer = null;
-  async function tick() {
-    if (!open) return;
+  // номер цикла: старый tick, дождавшийся ответа после закрытия и открытия, не заводит второй цикл
+  let loop = 0;
+  async function tick(my) {
+    if (!open || my !== loop) return;
     await Promise.all([refreshMixer(), refreshLoad()]);
-    if (open) timer = setTimeout(tick, 1000);
+    if (open && my === loop) timer = setTimeout(() => tick(my), 1000);
   }
   function sync() {
     const now = document.documentElement.classList.contains("overlay-open");
     if (now === open) return;
     open = now;
     clearTimeout(timer);
-    if (open) tick();
+    loop++;
+    if (open) tick(loop);
   }
   new MutationObserver(sync).observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
   sync();
