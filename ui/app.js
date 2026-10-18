@@ -956,6 +956,7 @@ function main() {
     if (p && S.t >= S.outT - 0.05 && S.t <= S.outT + 0.05) seek(S.inT);
     if (p && S.t >= (c ? c.duration : 0) - 0.05) seek(S.inT);
     S.playing = p;
+    if (p) kickFrames();
     // на паузе во весь экран панель с перемоткой сразу видна
     if (!p) document.body.classList.remove("fv-idle");
     else if (document.body.classList.contains("fullview")) fvWake();
@@ -1749,6 +1750,15 @@ function main() {
   }
 
   let last = performance.now();
+  // цикл кадров крутится, только пока играет видео (в браузере — всегда, там демо-фон):
+  // спрятанные окна иначе просыпались бы 60 раз в секунду
+  let frameOn = false;
+  function kickFrames() {
+    if (frameOn) return;
+    frameOn = true;
+    last = performance.now();
+    requestAnimationFrame(frame);
+  }
   function frame(now) {
     const dt = Math.min(0.1, (now - last) / 1000);
     last = now;
@@ -1762,7 +1772,8 @@ function main() {
     }
     if (c && c.demo && c.kind === "video") api.drawDemo(vctx, vc.width, vc.height, S.t, c);
     if (MODE === "browser") drawGameBg(now);
-    requestAnimationFrame(frame);
+    if (MODE === "browser" || S.playing) requestAnimationFrame(frame);
+    else frameOn = false;
   }
 
   // ---------- настройки ----------
@@ -2387,6 +2398,6 @@ function main() {
       toast("Нет связи с ядром", String(e), "error");
     }
     await loadClips().catch(() => {});
-    requestAnimationFrame(frame);
+    kickFrames();
   })();
 }
