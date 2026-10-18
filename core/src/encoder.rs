@@ -60,9 +60,12 @@ impl Encoder {
                 .context("кодировщик не принимает D3D11-устройство")?;
 
             if let Ok(api) = mft.cast::<ICodecAPI>() {
-                // 2 = переменный битрейт без жёсткого потолка: качество стабильнее
-                set_codec(&api, &CODECAPI_AVEncCommonRateControlMode, VARIANT::from(2u32), "режим битрейта");
+                // 1 = переменный битрейт с потолком. Без потолка (2) NVENC в динамичных играх
+                // давал почти вдвое больше заданного (BF6: 11–13 Мбит/с при 6) — буфер в памяти
+                // и клипы на диске были больше, чем обещают настройки. Потолок — 1,5× от среднего.
+                set_codec(&api, &CODECAPI_AVEncCommonRateControlMode, VARIANT::from(1u32), "режим битрейта");
                 set_codec(&api, &CODECAPI_AVEncCommonMeanBitRate, VARIANT::from(s.bitrate), "битрейт");
+                set_codec(&api, &CODECAPI_AVEncCommonMaxBitRate, VARIANT::from(s.bitrate / 2 * 3), "предел битрейта");
                 // ключевой кадр каждую секунду — отрезок можно начать почти с любого места
                 set_codec(&api, &CODECAPI_AVEncMPVGOPSize, VARIANT::from(s.fps), "интервал ключевых кадров");
                 // без B-кадров: проще и надёжнее резать без перекодирования
