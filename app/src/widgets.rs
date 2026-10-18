@@ -145,6 +145,17 @@ pub async fn mixer_state(app: AppHandle) -> Res<MixerDto> {
     })
 }
 
+/// Значок приложения из микшера (data:-URL PNG) или None — тогда в строке общий значок.
+/// Окно спрашивает один раз для каждого приложения, не при каждом обновлении микшера.
+#[tauri::command]
+pub async fn mixer_icon(key: String) -> Res<Option<String>> {
+    use base64::Engine;
+    crate::blocking(move || {
+        Ok(volume::app_icon(&key).map(|png| format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png))))
+    })
+    .await
+}
+
 /// Сделать устройство вывода или микрофон устройством по умолчанию в Windows.
 #[tauri::command]
 pub async fn set_default_device(id: String) -> Res<()> {

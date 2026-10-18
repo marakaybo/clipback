@@ -65,6 +65,11 @@
   padding: 4px 6px;
 }
 .mx-master { grid-template-columns: 28px minmax(0, 1fr); padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.mx-row:not(.mx-master) { grid-template-columns: 28px 18px minmax(0, 1fr) 28px; }
+.mx-icon { display: grid; place-items: center; width: 18px; height: 18px; color: var(--text-3); }
+.mx-icon img { width: 18px; height: 18px; object-fit: contain; }
+.mx-icon svg { stroke-width: 1.8; }
+.mx-row.muted-app .mx-icon, .mx-row.idle .mx-icon { opacity: .55; }
 .mx-list { overflow-y: auto; min-height: 0; padding: 4px 0 6px; }
 .mx-body { min-width: 0; }
 .mx-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: var(--fs-sm); }
