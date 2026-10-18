@@ -95,6 +95,11 @@ struct Inner {
     record_started: Option<u64>,
     /// Запись попросили, когда захват был выключен: начать её сразу после запуска.
     record_after_start: bool,
+    /// Старый рекордер ещё дописывает файлы в фоне (`stop_recording`).
+    stopping: bool,
+    /// Включить захват, как только закончится остановка или текущий запуск
+    /// (перезапуск после смены настроек).
+    start_pending: bool,
 }
 
 struct AppState {
@@ -112,6 +117,8 @@ struct AppState {
     /// Скрытые записи (тот же список имён, что и избранное, в `hidden.json`).
     hidden: Mutex<library::Favorites>,
     trash: trash::Trash,
+    /// Поток, который дописывает и закрывает остановленный рекордер.
+    stopper: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 #[derive(Serialize, Clone)]
@@ -140,7 +147,7 @@ struct StateDto {
 fn dto(i: &Inner) -> StateDto {
     StateDto {
         recording: i.recorder.is_some(),
-        starting: i.starting,
+        starting: i.starting || i.start_pending,
         capture: i.capture.clone(),
         status: i.status.clone(),
         error: i.error.clone(),
@@ -246,7 +253,14 @@ fn capture_config(s: &Settings) -> Config {
 fn start_recording(app: &AppHandle) {
     let cfg = {
         let mut i = lock(app);
-        if i.recorder.is_some() || i.starting {
+        if i.recorder.is_some() {
+            return;
+        }
+        if i.starting || i.stopping {
+            // запуск или остановка ещё идут — запустим с текущими настройками, когда закончатся
+            i.start_pending = true;
+            drop(i);
+            emit_state(app);
             return;
         }
         i.starting = true;
@@ -262,6 +276,13 @@ fn start_recording(app: &AppHandle) {
             Ok((mut rec, started)) => {
                 let (_, dummy) = mpsc::channel();
                 let events = std::mem::replace(&mut rec.events, dummy);
+                if start_was_cancelled(&app, generation) {
+                    // пока шёл запуск, запись выключили или поменяли настройки
+                    drop(rec);
+                    log("запуск записи отменён");
+                    finish_cancelled_start(&app);
+                    return;
+                }
                 {
                     let mut i = lock(&app);
                     i.starting = false;
@@ -284,6 +305,10 @@ fn start_recording(app: &AppHandle) {
             }
             Err(e) => {
                 log(format!("запись не запустилась: {e:#}"));
+                if start_was_cancelled(&app, generation) {
+                    finish_cancelled_start(&app);
+                    return;
+                }
                 {
                     let mut i = lock(&app);
                     i.starting = false;
@@ -321,21 +346,90 @@ fn retry_recording_later(app: &AppHandle, generation: u64) {
     });
 }
 
+/// Генерация сменилась, пока шёл `Recorder::start`: снимаем флаг запуска.
+fn start_was_cancelled(app: &AppHandle, generation: u64) -> bool {
+    let mut i = lock(app);
+    if st(app).generation.load(Ordering::SeqCst) == generation {
+        i.start_pending = false;
+        return false;
+    }
+    i.starting = false;
+    true
+}
+
+fn finish_cancelled_start(app: &AppHandle) {
+    let pending = std::mem::take(&mut lock(app).start_pending);
+    emit_state(app);
+    if pending {
+        start_recording(app);
+    }
+}
+
+/// Остановить захват. Дописывание буфера и файла записи идёт в фоне: команды интерфейса
+/// и меню трея выполняются в главном потоке, и окно, трей и клавиши замирали бы на секунды.
 fn stop_recording(app: &AppHandle) {
+    stop_recording_inner(app, false);
+}
+
+/// То же, но дождаться конца (сон и выключение Windows).
+fn stop_recording_wait(app: &AppHandle) {
+    stop_recording_inner(app, true);
+}
+
+fn stop_recording_inner(app: &AppHandle, wait: bool) {
     let rec = {
         let mut i = lock(app);
         i.status = None;
         i.capture_blocked = None;
         i.record_started = None;
-        i.recorder.take()
+        i.start_pending = false;
+        let rec = i.recorder.take();
+        if rec.is_some() {
+            i.stopping = true;
+        }
+        rec
     };
     st(app).generation.fetch_add(1, Ordering::SeqCst);
     show_indicator(app, false);
-    // остановка ждёт поток захвата (и дописывание файла записи) — делаем это вне блокировки
-    drop(rec);
-    log("запись остановлена");
-    clips_changed(app);
     emit_state(app);
+    let Some(rec) = rec else {
+        if wait {
+            wait_stopper(app);
+        }
+        return;
+    };
+    let a = app.clone();
+    let finish = move || {
+        // остановка ждёт поток захвата (и дописывание файла записи) — вне блокировки
+        drop(rec);
+        log("запись остановлена");
+        let pending = {
+            let mut i = lock(&a);
+            i.stopping = false;
+            std::mem::take(&mut i.start_pending)
+        };
+        clips_changed(&a);
+        emit_state(&a);
+        if pending {
+            start_recording(&a);
+        }
+    };
+    if wait {
+        wait_stopper(app);
+        finish();
+    } else {
+        // прошлой остановки здесь быть не может: пока она идёт, захват не запускается
+        let h = std::thread::spawn(finish);
+        *st(app).stopper.lock().unwrap_or_else(|e| e.into_inner()) = Some(h);
+    }
+}
+
+/// Дождаться фоновой остановки (перед сном, выходом и обновлением файл записи должен дописаться).
+fn wait_stopper(app: &AppHandle) {
+    let h = st(app).stopper.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(h) = h {
+        let _ = h.join();
+    }
 }
 
 fn restart_recording(app: &AppHandle) {
@@ -1484,9 +1578,19 @@ fn quit_app(app: AppHandle) {
 // ---------- запуск ----------
 
 /// Остановить запись перед выходом (обычным или ради обновления).
-fn stop_for_exit(app: &AppHandle) {
-    let rec = lock(app).recorder.take();
+/// Возвращает, шёл ли захват (чтобы включить его снова, если обновление не удалось).
+fn stop_for_exit(app: &AppHandle) -> bool {
+    let rec = {
+        let mut i = lock(app);
+        i.start_pending = false;
+        i.recorder.take()
+    };
+    // иначе forward_events примет закрытый канал за падение захвата и запланирует перезапуск
+    st(app).generation.fetch_add(1, Ordering::SeqCst);
+    let was = rec.is_some();
     drop(rec);
+    wait_stopper(app);
+    was
 }
 
 pub fn run() {
@@ -1549,6 +1653,7 @@ pub fn run() {
             favorites: Mutex::new(library::Favorites::load(cfg_dir.join("favorites.json"))),
             hidden: Mutex::new(library::Favorites::load(cfg_dir.join("hidden.json"))),
             trash: trash::Trash::default(),
+            stopper: Mutex::new(None),
             });
 
             widgets::init(&handle);
@@ -1635,7 +1740,7 @@ pub fn run() {
         .run(|app, e| {
             if let tauri::RunEvent::Exit = e {
                 // корректно останавливаем захват; то, что ждало «Вернуть», — в корзину
-                stop_for_exit(app);
+                let _ = stop_for_exit(app);
                 st(app).trash.finalize_all();
                 log("выход");
             }

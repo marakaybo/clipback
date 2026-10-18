@@ -148,7 +148,16 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
     // «что нового» покажем один раз после перезапуска уже в новой версии
     remember_notes(&app, &update.version, update.body.as_deref().unwrap_or(""));
     // запись надо остановить до замены файлов
-    crate::stop_for_exit(&app);
+    let was_recording = crate::stop_for_exit(&app);
+    let r = apply(&app, &update, bytes);
+    if r.is_err() && was_recording {
+        // обновиться не вышло — программа работает дальше, и запись тоже
+        crate::start_recording(&app);
+    }
+    r
+}
+
+fn apply(app: &AppHandle, update: &Update, bytes: Vec<u8>) -> Result<(), String> {
     if is_portable() {
         if let Err(e) = replace_self(&bytes) {
             // нет прав на папку (Program Files, защищённая папка, OneDrive) — ставим через

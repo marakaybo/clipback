@@ -15,7 +15,7 @@
 //! на него, а после WM_ENDSESSION процесс могут завершить в любой момент. Пока файл
 //! дописывается, Windows показывает причину (`ShutdownBlockReasonCreate`).
 
-use crate::{lock, log, register_hotkeys, start_recording, stop_recording};
+use crate::{lock, log, register_hotkeys, start_recording, stop_recording_wait};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::AppHandle;
@@ -175,7 +175,7 @@ fn on_suspend(app: &AppHandle) {
     log(format!("сон: {}", what_stops(running, live)));
     // Windows даёт на это около 2 с; если файл не успеет дописаться — допишется после пробуждения
     if stop {
-        stop_recording(app);
+        stop_recording_wait(app);
     }
 }
 
@@ -237,7 +237,7 @@ fn on_query_end(app: &AppHandle, h: HWND, logoff: bool) {
     // причина видна на экране «Эти приложения мешают выключению», только пока дописывается файл
     let blocked = live && unsafe { ShutdownBlockReasonCreate(h, w!("Сохраняется запись экрана")) }.is_ok();
     let t = Instant::now();
-    stop_recording(app);
+    stop_recording_wait(app);
     if blocked {
         unsafe {
             let _ = ShutdownBlockReasonDestroy(h);
