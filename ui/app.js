@@ -102,6 +102,7 @@ if (MODE === "toast") {
     el.classList.remove("show");
     void el.offsetWidth; // перезапуск анимации
     el.classList.add("show");
+    requestAnimationFrame(() => requestAnimationFrame(() => api.call("window_painted").catch(() => {})));
   });
 } else {
   main();
@@ -2371,8 +2372,12 @@ function main() {
       mediaRetries = 0;
       reloadMedia();
     }
-    // два кадра: окно успевает показаться прозрачным, потом интерфейс плавно проявляется
-    requestAnimationFrame(() => requestAnimationFrame(() => document.documentElement.classList.add("overlay-open")));
+    // два кадра: окно успевает показаться прозрачным, потом интерфейс плавно проявляется;
+    // window_painted снимает «плащ» с окна — до первого кадра оно мелькало белым
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      document.documentElement.classList.add("overlay-open");
+      api.call("window_painted").catch(() => {});
+    }));
     winHidden = false;
     clipsDirty = false;
     loadClips();

@@ -728,14 +728,36 @@ fn toggle_overlay(app: &AppHandle) {
         let _ = w.set_position(PhysicalPosition::new(m.position().x, m.position().y));
         let _ = w.set_size(PhysicalSize::new(m.size().width, m.size().height));
     }
-    st(app).overlay_seq.fetch_add(1, Ordering::SeqCst);
+    let seq = st(app).overlay_seq.fetch_add(1, Ordering::SeqCst) + 1;
     // интерфейс оверлея начинает прозрачным и плавно проявляется (см. overlay-shown)
     let _ = app.emit_to("overlay", "overlay-will-show", ());
+    show_cloaked(app, &w, move |a| st(a).overlay_seq.load(Ordering::SeqCst) == seq);
     let _ = w.show();
     let _ = w.set_always_on_top(true);
     let _ = w.set_focus();
     let _ = app.emit_to("overlay", "overlay-shown", ());
     emit_state(app);
+}
+
+/// Долго спрятанный WebView2 после показа рисует первый кадр не сразу — до него на экране
+/// мелькал белый фон. Окно показывается под «плащом» DWM и открывается, когда страница
+/// нарисовала кадр (`window_painted`), а без ответа — через 300 мс. Пока окно спрятано,
+/// ничего не работает: поток живёт только эти 300 мс после показа.
+fn show_cloaked(
+    app: &AppHandle,
+    w: &tauri::WebviewWindow,
+    still_current: impl Fn(&AppHandle) -> bool + Send + 'static,
+) {
+    let Ok(h) = w.hwnd() else { return };
+    let hwnd = h.0 as isize;
+    winutil::cloak(hwnd, true);
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        if still_current(&app) {
+            winutil::cloak(hwnd, false);
+        }
+    });
 }
 
 #[derive(Serialize, Clone)]
@@ -755,6 +777,7 @@ fn show_toast(app: &AppHandle, title: &str, sub: &str, icon: &str) {
         let (tw, margin) = ((360.0 * scale) as i32, (20.0 * scale) as i32);
         let _ = w.set_position(PhysicalPosition::new(m.position().x + m.size().width as i32 - tw - margin, m.position().y + margin));
     }
+    show_cloaked(app, &w, move |a| st(a).toast_seq.load(Ordering::SeqCst) == seq);
     if let Ok(h) = w.hwnd() {
         winutil::show_no_activate(h.0 as isize);
     }
@@ -1627,6 +1650,14 @@ async fn pick_folder(app: AppHandle, window: tauri::Window) -> Option<String> {
     d.blocking_pick_folder().and_then(|p| p.into_path().ok()).map(|p| p.to_string_lossy().into_owned())
 }
 
+/// Страница оверлея или уведомления нарисовала кадр после показа — снимаем «плащ».
+#[tauri::command]
+fn window_painted(window: tauri::Window) {
+    if let Ok(h) = window.hwnd() {
+        winutil::cloak(h.0 as isize, false);
+    }
+}
+
 #[tauri::command]
 fn hide_overlay_cmd(app: AppHandle) {
     hide_overlay(&app)
@@ -1838,6 +1869,7 @@ pub fn run() {
             audio_peaks,
             pick_folder,
             hide_overlay_cmd,
+            window_painted,
             show_main_cmd,
             frontend_log,
             quit_app,

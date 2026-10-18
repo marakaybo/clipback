@@ -271,7 +271,7 @@
     },
     pick_folder: () => (state.folderProblem ? "D:\\Клипы" : null),
     hide_overlay_cmd: () => { document.body.classList.add("closed"); document.documentElement.classList.remove("overlay-open"); },
-    show_main_cmd: () => {},
+    show_main_cmd: () => {}, window_painted: () => {},
     reveal_clip: () => {}, open_clips_folder: () => {}, copy_clip: () => {}, frontend_log: () => {}, quit_app: () => {},
   };
 
