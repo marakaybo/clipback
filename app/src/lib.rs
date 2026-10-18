@@ -1019,9 +1019,15 @@ fn toggle_record_cmd(app: AppHandle) {
     toggle_record(&app)
 }
 
+/// Долгая работа (диск, перекодирование, COM) — в отдельном потоке: иначе она занимает
+/// поток асинхронных команд, и опрос состояния и микшера ждёт, пока идёт экспорт.
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Res<T> + Send + 'static) -> Res<T> {
+    tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 async fn screenshot(app: AppHandle) -> Res<clips::ClipEntry> {
-    take_screenshot(&app)
+    blocking(move || take_screenshot(&app)).await
 }
 
 #[tauri::command]
@@ -1170,6 +1176,20 @@ async fn trim_clip(
     replace: bool,
     audio_keep: Option<Vec<usize>>,
     // громкость каждой дорожки файла (1 — как есть); None — не менялась
+    audio_gains: Option<Vec<f32>>,
+    quality: Option<String>,
+) -> Res<clips::TrimOut> {
+    blocking(move || trim_clip_now(app, path, start, end, replace, audio_keep, audio_gains, quality)).await
+}
+
+#[allow(clippy::too_many_arguments)]
+fn trim_clip_now(
+    app: AppHandle,
+    path: String,
+    start: f64,
+    end: f64,
+    replace: bool,
+    audio_keep: Option<Vec<usize>>,
     audio_gains: Option<Vec<f32>>,
     quality: Option<String>,
 ) -> Res<clips::TrimOut> {
@@ -1482,20 +1502,24 @@ fn list_monitors() -> Vec<MonitorDto> {
 
 #[tauri::command]
 async fn list_audio_apps() -> Res<Vec<clipback_core::audio::AudioApp>> {
-    clipback_core::audio::list_audio_apps().map_err(|e| format!("{e:#}"))
+    blocking(|| clipback_core::audio::list_audio_apps().map_err(|e| format!("{e:#}"))).await
 }
 
 /// Форма волны звуковых дорожек клипа (считается один раз и запоминается).
 #[tauri::command]
 async fn audio_peaks(app: AppHandle, path: String, bins: usize) -> Res<Vec<Vec<f32>>> {
-    let p = checked_path(&app, &path)?;
+    blocking(move || audio_peaks_now(&app, &path, bins)).await
+}
+
+fn audio_peaks_now(app: &AppHandle, path: &str, bins: usize) -> Res<Vec<Vec<f32>>> {
+    let p = checked_path(app, path)?;
     let e = clips::entry(&p).map_err(|e| format!("{e:#}"))?;
     let key = format!("{}|{}|{}", e.path, e.modified, bins);
-    if let Some(v) = st(&app).peaks.lock().ok().and_then(|m| m.get(&key).cloned()) {
+    if let Some(v) = st(app).peaks.lock().ok().and_then(|m| m.get(&key).cloned()) {
         return Ok(v);
     }
     let v = clipback_core::media::audio_peaks(&p, bins, e.duration).map_err(|e| format!("{e:#}"))?;
-    if let Ok(mut m) = st(&app).peaks.lock() {
+    if let Ok(mut m) = st(app).peaks.lock() {
         if m.len() > 64 {
             m.clear();
         }
@@ -1506,7 +1530,7 @@ async fn audio_peaks(app: AppHandle, path: String, bins: usize) -> Res<Vec<Vec<f
 
 #[tauri::command]
 async fn list_mics() -> Res<Vec<clipback_core::audio::Device>> {
-    clipback_core::audio::list_mics().map_err(|e| format!("{e:#}"))
+    blocking(|| clipback_core::audio::list_mics().map_err(|e| format!("{e:#}"))).await
 }
 
 /// Windows запретила приложениям микрофон (тогда в запись идёт тишина).
