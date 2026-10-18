@@ -786,8 +786,10 @@ fn run_source(index: usize, kind: &SourceKind, t0: i64, out: &Sender<Chunk>, sto
                 }
                 if !got {
                     match o.event {
+                        // событие срабатывает, как только пришёл звук; ожидание — только для
+                        // проверок и тишины, когда устройство молчит (раньше 10 мс — 100 пробуждений в секунду)
                         Some(ev) => {
-                            WaitForSingleObject(ev, 10);
+                            WaitForSingleObject(ev, 50);
                         }
                         None => std::thread::sleep(Duration::from_millis(5)),
                     }

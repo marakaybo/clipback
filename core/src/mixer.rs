@@ -421,7 +421,8 @@ fn mixer_loop(lay: Layout, mut encoders: Vec<AacEncoder>, t0: i64, out: Sender<(
             crate::util::log(format!("звук ({}): поток источника завершился", lay.sources[i].kind.describe()));
             break;
         }
-        match rx.recv_timeout(Duration::from_millis(20)) {
+        // звук приходит без ожидания; таймаут — только когда все источники молчат
+        match rx.recv_timeout(Duration::from_millis(50)) {
             Ok(c) => {
                 let now = Instant::now();
                 // автоусиление — до замера уровня: индикатор «в записи» показывает то, что попадёт в файл
