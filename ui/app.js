@@ -733,7 +733,10 @@ function main() {
     v.preload = "auto";
     v.crossOrigin = "anonymous";
     const queue = [];
+    // последние 200 кадров (Map помнит порядок: свежие в конце) — иначе память окна только растёт
     const cache = new Map();
+    const CACHE_MAX = 200;
+    let releaseTimer = null;
     let busy = false;
     let currentUrl = "";
     let currentPath = "";
@@ -748,6 +751,7 @@ function main() {
     async function pump() {
       if (busy) return;
       busy = true;
+      clearTimeout(releaseTimer);
       while (queue.length) {
         const job = queue.shift();
         try {
@@ -767,6 +771,7 @@ function main() {
           cv.width = job.w; cv.height = job.h;
           cv.getContext("2d").drawImage(v, 0, 0, job.w, job.h);
           cache.set(job.key, cv);
+          while (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value);
           job.resolve(cloneCanvas(cv));
         } catch {
           currentUrl = "";
@@ -774,12 +779,25 @@ function main() {
         }
       }
       busy = false;
+      // очередь пуста — отпускаем файл, иначе его нельзя переименовать, заменить или удалить
+      releaseTimer = setTimeout(() => {
+        if (busy || queue.length) return;
+        currentUrl = "";
+        currentPath = "";
+        v.removeAttribute("src");
+        v.load();
+      }, 3000);
     }
 
     return {
       get(clip, time, w, h, group) {
         const key = `${clip.path}|${clip.modified}|${time.toFixed(2)}|${w}`;
-        if (cache.has(key)) return Promise.resolve(cloneCanvas(cache.get(key)));
+        const hit = cache.get(key);
+        if (hit) {
+          cache.delete(key);
+          cache.set(key, hit);
+          return Promise.resolve(cloneCanvas(hit));
+        }
         return new Promise((resolve) => {
           const job = { clip, time, w, h, key, group, resolve };
           // кадры для таймлайна важнее превью в списке
