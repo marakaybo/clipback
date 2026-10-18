@@ -648,6 +648,8 @@ pub struct Diag {
     /// Пик сырого сигнала до усиления.
     peak: f32,
     reopens: u32,
+    /// Когда сводка последний раз попала в журнал.
+    logged: Option<Instant>,
 }
 
 impl Diag {
@@ -658,12 +660,19 @@ impl Diag {
     }
 
     pub fn new() -> Self {
-        Self { since: Instant::now(), frames: 0, rate: RATE, packets: 0, silent_packets: 0, peak: 0.0, reopens: 0 }
+        Self { since: Instant::now(), frames: 0, rate: RATE, packets: 0, silent_packets: 0, peak: 0.0, reopens: 0, logged: None }
     }
 
     fn report(&mut self, kind: &SourceKind, p: &mut Placer) {
         let secs = |f: i64| f as f64 / RATE as f64;
         let st = std::mem::take(&mut p.stats);
+        // всё в порядке — сводка раз в 30 мин, а не каждые 5 (журнал иначе наполовину из них)
+        let odd = st.silence > RATE as i64 || st.dropped > RATE as i64 || self.reopens > 0;
+        let logged = self.logged;
+        if !odd && logged.is_some_and(|t| t.elapsed() < Self::every() * 6) {
+            *self = Self { logged, ..Self::new() };
+            return;
+        }
         let peak_db = if self.peak > 0.0 { format!("{:.0} дБ", 20.0 * self.peak.log10()) } else { "ноль".into() };
         crate::util::log(format!(
             "звук ({}) за {:.0} мин: от устройства {:.1} с в {} пакетах (с пометкой «тишина» {}), пик {:.4} ({peak_db}); в запись {:.1} с, вставлено тишины {:.1} с, выброшено {:.1} с, поправка часов {:+.0} ppm, переоткрытий {}",
@@ -679,7 +688,7 @@ impl Diag {
             p.correction() * 1e6,
             self.reopens,
         ));
-        *self = Self { reopens: 0, ..Self::new() };
+        *self = Self { logged: Some(Instant::now()), ..Self::new() };
     }
 }
 

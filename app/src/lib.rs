@@ -207,26 +207,36 @@ fn clips_changed(app: &AppHandle) {
 // ---------- журнал ----------
 
 static LOG_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+/// Размер журнала: при 2 МБ он откладывается в clipback.old.log прямо во время работы,
+/// а не только при запуске (компьютер неделями не выключают).
+static LOG_BYTES: AtomicU64 = AtomicU64::new(0);
+const LOG_MAX: u64 = 2_000_000;
 
 pub fn log(msg: impl AsRef<str>) {
-    let line = format!("[{}] {}\n", util::file_stamp(), msg.as_ref());
+    let line = format!("[{}] {}
+", util::file_stamp(), msg.as_ref());
     if cfg!(debug_assertions) {
         eprint!("{line}");
     }
-    if let Some(p) = LOG_PATH.lock().ok().and_then(|g| g.clone()) {
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
-            let _ = f.write_all(line.as_bytes());
-        }
+    let Ok(guard) = LOG_PATH.lock() else { return };
+    let Some(p) = guard.as_ref() else { return };
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+        let _ = f.write_all(line.as_bytes());
+    }
+    if LOG_BYTES.fetch_add(line.len() as u64, Ordering::Relaxed) + line.len() as u64 > LOG_MAX {
+        let _ = std::fs::rename(p, p.with_file_name("clipback.old.log"));
+        LOG_BYTES.store(0, Ordering::Relaxed);
     }
 }
 
 fn init_log(dir: &Path) {
     let _ = std::fs::create_dir_all(dir);
     let p = dir.join("clipback.log");
-    // журнал не разрастается: больше 1 МБ — откладываем его в clipback.old.log и начинаем новый
-    if std::fs::metadata(&p).map(|m| m.len() > 1_000_000).unwrap_or(false) {
+    // журнал не разрастается: больше 2 МБ — откладываем его в clipback.old.log и начинаем новый
+    if std::fs::metadata(&p).map(|m| m.len() > LOG_MAX).unwrap_or(false) {
         let _ = std::fs::rename(&p, dir.join("clipback.old.log"));
     }
+    LOG_BYTES.store(std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0), Ordering::Relaxed);
     *LOG_PATH.lock().unwrap() = Some(p);
     std::panic::set_hook(Box::new(|info| log(format!("ПАНИКА: {info}"))));
 }
