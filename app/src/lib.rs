@@ -1319,6 +1319,11 @@ async fn copy_image(png_base64: String) -> Res<()> {
     let mut dec = png::Decoder::new(std::io::Cursor::new(data));
     dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut r = dec.read_info().map_err(err)?;
+    // размеры из заголовка: не выделяем гигабайты под испорченную или огромную картинку
+    let (w, h) = (r.info().width as u64, r.info().height as u64);
+    if w * h > 64_000_000 {
+        return Err(format!("картинка слишком большая для буфера обмена ({w}×{h})"));
+    }
     let mut buf = vec![0; r.output_buffer_size()];
     let info = r.next_frame(&mut buf).map_err(err)?;
     let px = &buf[..info.buffer_size()];

@@ -92,7 +92,16 @@ pub fn copy_file_to_clipboard(path: &Path) -> Result<()> {
         std::ptr::copy_nonoverlapping(list.as_ptr() as *const u8, ptr.add(header), list.len() * 2);
         let _ = GlobalUnlock(mem);
 
-        if OpenClipboard(None).is_err() {
+        // менеджеры буфера и RDP держат его по нескольку миллисекунд — несколько попыток
+        let mut opened = false;
+        for _ in 0..10 {
+            if OpenClipboard(None).is_ok() {
+                opened = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        if !opened {
             let _ = GlobalFree(Some(mem));
             bail!("буфер обмена занят другой программой");
         }
