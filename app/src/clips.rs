@@ -137,6 +137,20 @@ pub fn list(dir: &Path) -> Vec<ClipEntry> {
     v
 }
 
+/// Недописанные файлы (`.part`) прошлых запусков — в папке клипов и папках игр.
+/// Свежие не трогаем: такой может как раз записываться.
+pub fn stale_parts(dir: &Path, older_than: std::time::Duration) -> Vec<PathBuf> {
+    let files = |d: &Path| -> Vec<PathBuf> { std::fs::read_dir(d).map(|rd| rd.flatten().map(|e| e.path()).collect()).unwrap_or_default() };
+    let top = files(dir);
+    let nested = top.iter().filter(|p| p.is_dir() && !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.'))).flat_map(|d| files(d));
+    top.iter()
+        .cloned()
+        .chain(nested)
+        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("part")))
+        .filter(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age >= older_than))
+        .collect()
+}
+
 /// canonicalize() в Windows даёт `\\?\C:\...` — возвращаем обычный вид `C:\...`,
 /// иначе пути не совпадут с теми, что видит интерфейс.
 fn simplify(p: PathBuf) -> PathBuf {

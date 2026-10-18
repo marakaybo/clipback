@@ -5,6 +5,7 @@
 
 use crate::aac::AudioPacket;
 use crate::encoder::Packet;
+use crate::journal::{self, Journal};
 use crate::mux::{self, Writer, TIMESCALE};
 use anyhow::{bail, Result};
 use bytes::Bytes;
@@ -28,6 +29,8 @@ pub struct LiveWriter {
     /// Позиция следующего кадра AAC в каждой дорожке (отсчёты от начала записи).
     audio_pos: Vec<i64>,
     silence: Bytes,
+    /// Список кадров для восстановления после сбоя (`journal.rs`); не создался — пишем без него.
+    j: Option<Journal>,
 }
 
 impl LiveWriter {
@@ -38,9 +41,10 @@ impl LiveWriter {
         let Some((sps, pps)) = mux::find_sps_pps(&first.data) else { bail!("в первом кадре нет SPS/PPS") };
         let tmp = path.with_extension("part");
         let mut w = mux::new_writer(&tmp)?;
-        mux::add_video(&mut w, width, height, sps, pps, TIMESCALE as u32)?;
         // без кадра тишины пропуски в звуке не заполнить — тогда пишем только видео
         let tracks = if silence.is_empty() { 0 } else { names.len() };
+        let j = Journal::create(&tmp, width, height, &sps, &pps, &names[..tracks]).ok();
+        mux::add_video(&mut w, width, height, sps, pps, TIMESCALE as u32)?;
         for _ in 0..tracks {
             mux::add_audio(&mut w, mux::our_aac(), crate::audio::RATE)?;
         }
@@ -54,7 +58,18 @@ impl LiveWriter {
             last_dur: TIMESCALE / 60,
             audio_pos: vec![0; tracks],
             silence: Bytes::copy_from_slice(silence),
+            j,
         })
+    }
+
+    fn put(&mut self, track: u32, s: &Mp4Sample) -> Result<()> {
+        self.w.write_sample(track, s)?;
+        if let Some(j) = &mut self.j {
+            if j.add(track, s).is_err() {
+                self.j = None;
+            }
+        }
+        Ok(())
     }
 
     fn ts(&self, pts: i64) -> u64 {
@@ -77,7 +92,7 @@ impl LiveWriter {
     }
 
     fn write_video(&mut self, start: u64, p: &Packet, dur: u64) -> Result<()> {
-        self.w.write_sample(
+        self.put(
             1,
             &Mp4Sample { start_time: start, duration: dur as u32, rendering_offset: 0, is_sync: p.key, bytes: Bytes::from(mux::annexb_to_avcc(&p.data)) },
         )?;
@@ -97,13 +112,23 @@ impl LiveWriter {
         // большой пропуск (звук пропадал) — не больше минуты тишины за раз
         let mut gaps = 0;
         while rel - pos >= frame && gaps < 3000 {
-            self.w.write_sample(track as u32 + 2, &mux::audio_sample(pos, self.silence.clone()))?;
+            self.put(track as u32 + 2, &mux::audio_sample(pos, self.silence.clone()))?;
             pos += frame;
             gaps += 1;
         }
-        self.w.write_sample(track as u32 + 2, &mux::audio_sample(pos, Bytes::from(p.data.clone())))?;
+        self.put(track as u32 + 2, &mux::audio_sample(pos, Bytes::from(p.data.clone())))?;
         self.audio_pos[track] = pos + frame;
         Ok(())
+    }
+
+    /// Тест: программа «упала» — всё, что успели записать, на диске, оглавления нет.
+    #[cfg(test)]
+    fn crash(self) {
+        use std::io::Write;
+        if let Some(mut j) = self.j {
+            j.flush_now();
+        }
+        let _ = self.w.into_writer().flush();
     }
 
     /// Дописать последний кадр и оглавление. Возвращает длину записи в секундах.
@@ -119,11 +144,13 @@ impl LiveWriter {
         for k in 0..self.audio_pos.len() {
             while self.audio_pos[k] + crate::aac::FRAME <= end_samples {
                 let pos = self.audio_pos[k];
-                self.w.write_sample(k as u32 + 2, &mux::audio_sample(pos, self.silence.clone()))?;
+                let s = mux::audio_sample(pos, self.silence.clone());
+                self.w.write_sample(k as u32 + 2, &s)?;
                 self.audio_pos[k] += crate::aac::FRAME;
             }
         }
-        let LiveWriter { mut w, tmp, path, names, .. } = self;
+        let LiveWriter { mut w, tmp, path, names, j, .. } = self;
+        drop(j);
         let r = (|| {
             w.write_end()?;
             drop(w);
@@ -132,7 +159,10 @@ impl LiveWriter {
             }
             Ok(())
         })();
-        mux::finish(&tmp, &path, r)?;
+        let r = mux::finish(&tmp, &path, r);
+        // файл дописан (или ошибка и `.part` уже удалён) — журнал больше не нужен
+        let _ = std::fs::remove_file(journal::path_for(&tmp));
+        r?;
         Ok((path, end as f64 / TIMESCALE as f64))
     }
 }

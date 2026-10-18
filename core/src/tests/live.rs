@@ -72,6 +72,35 @@ fn writes_video_and_audio_as_it_goes() {
     assert!(counts[0] as i64 * crate::aac::FRAME >= 3 * 48_000 - crate::aac::FRAME);
 }
 
+#[test]
+fn crashed_recording_is_recovered_from_journal() {
+    let path = tmp("live-crash.mp4");
+    let part = path.with_extension("part");
+    let _ = std::fs::remove_file(&part);
+    let names = vec!["Звук системы".to_string()];
+    let mut w = LiveWriter::create(&path, &pkt(0, 0), &names, &silence(), 1280, 720).unwrap();
+    let mut apos = 0;
+    // 200 кадров: на диске три полных секундных куска, четвёртый был в памяти
+    for i in 0..200 {
+        w.video(pkt(i, 0)).unwrap();
+        while ring_time(apos) <= i as i64 * 10_000_000 / 60 {
+            w.audio(0, &AudioPacket { data: vec![1, 2, 3], pos: apos }).unwrap();
+            apos += crate::aac::FRAME;
+        }
+    }
+    w.crash();
+    // без оглавления файл не открыть — ради этого журнал и нужен
+    assert!(clip_info(&part).is_err());
+    let (out, secs) = journal::recover(&part).unwrap();
+    assert_eq!(out, path);
+    assert!(!part.exists() && !journal::path_for(&part).exists());
+    assert!((secs - 3.0).abs() < 0.05, "{secs}");
+    let info = clip_info(&path).unwrap();
+    assert!((info.duration - 3.0).abs() < 0.1, "{}", info.duration);
+    assert_eq!(info.audio_tracks, 1);
+    assert_eq!(info.audio_names, names);
+}
+
 fn ring_time(pos: i64) -> i64 {
     crate::ring::audio_time(pos)
 }

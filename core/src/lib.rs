@@ -14,6 +14,7 @@ pub mod cursor;
 pub mod encoder;
 pub mod gpu;
 pub mod hotkey;
+pub mod journal;
 pub mod live;
 pub mod media;
 pub mod mux;

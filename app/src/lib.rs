@@ -1577,6 +1577,34 @@ fn quit_app(app: AppHandle) {
 
 // ---------- запуск ----------
 
+/// После сбоя (программу убили, выключился свет) остаются `.part`: полноценную запись
+/// собираем заново по её журналу, недописанный повтор не спасти — он уходит в корзину Windows.
+fn recover_parts(app: AppHandle) {
+    std::thread::spawn(move || {
+        // окно уведомлений должно успеть загрузиться
+        std::thread::sleep(Duration::from_secs(3));
+        let dir = out_dir(&app);
+        for part in clips::stale_parts(&dir, Duration::from_secs(120)) {
+            if clipback_core::journal::path_for(&part).exists() {
+                match clipback_core::journal::recover(&part) {
+                    Ok((path, secs)) => {
+                        log(format!("запись восстановлена после сбоя ({:.0} с): {}", secs, path.display()));
+                        clips_changed(&app);
+                        let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                        show_toast(&app, "Запись восстановлена", &format!("{} · {}", fmt_secs(secs), name), "rec");
+                    }
+                    Err(e) => log(format!("не удалось восстановить {}: {e:#}", part.display())),
+                }
+            } else {
+                log(format!("недописанный файл в корзину: {}", part.display()));
+                if let Err(e) = winutil::move_to_recycle_bin(&part) {
+                    log(format!("в корзину не ушло: {e:#}"));
+                }
+            }
+        }
+    });
+}
+
 /// Остановить запись перед выходом (обычным или ради обновления).
 /// Возвращает, шёл ли захват (чтобы включить его снова, если обновление не удалось).
 fn stop_for_exit(app: &AppHandle) -> bool {
@@ -1662,6 +1690,7 @@ pub fn run() {
             watch_mic(handle.clone());
             power::start(&handle);
             storage::watch(handle.clone());
+            recover_parts(handle.clone());
             winutil::install_drag_cursors();
             build_tray(&handle)?;
             register_hotkeys(&handle);
