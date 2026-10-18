@@ -5,6 +5,7 @@ mod clips;
 mod indicator;
 mod library;
 mod nvidia;
+mod report;
 mod settings;
 mod sound;
 mod trash;
@@ -1523,6 +1524,9 @@ pub fn run() {
             delete_clips,
             undo_delete,
             reveal_clip,
+            update::open_releases_page,
+            report::save_report,
+            report::reveal_report,
             open_clips_folder,
             copy_clip,
             start_drag,

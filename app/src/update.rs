@@ -76,7 +76,40 @@ async fn find(app: &AppHandle) -> Result<Option<Update>, String> {
         b = b.endpoints(vec![url]).map_err(|e| e.to_string())?;
     }
     let updater = b.build().map_err(|e| e.to_string())?;
-    updater.check().await.map_err(|e| format!("не удалось проверить обновления: {e}"))
+    updater.check().await.map_err(|e| failure("не удалось проверить обновления", &e.to_string()))
+}
+
+/// Короткая причина для окна (подробности остаются в журнале).
+fn failure(what: &str, err: &str) -> String {
+    crate::log(format!("обновление: {what}: {err}"));
+    let e = err.to_lowercase();
+    let reason = if e.contains("signature") || e.contains("minisign") {
+        "подпись файла не подошла"
+    } else if e.contains("404") || e.contains("not found") {
+        "на GitHub пока нет подходящего файла"
+    } else if e.contains("403") || e.contains("429") || e.contains("rate limit") {
+        "GitHub временно отказал, попробуйте позже"
+    } else if e.contains("certificate") || e.contains("tls") || e.contains("ssl") {
+        "не удалось установить защищённое соединение"
+    } else if e.contains("dns") || e.contains("connect") || e.contains("timed out") || e.contains("timeout") || e.contains("error sending request") || e.contains("network") {
+        "нет связи с GitHub — проверьте интернет"
+    } else if e.contains("permission") || e.contains("access is denied") || e.contains("отказано") {
+        "нет доступа к файлам программы"
+    } else {
+        "неизвестная ошибка, подробности в журнале"
+    };
+    format!("{what}: {reason}")
+}
+
+/// Открывает страницу последней версии в браузере («Скачать вручную»).
+#[tauri::command]
+pub fn open_releases_page() {
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    unsafe {
+        ShellExecuteW(None, w!("open"), w!("https://github.com/marakaybo/clipback/releases/latest"), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
+    }
 }
 
 #[tauri::command]
@@ -110,7 +143,7 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
             || {},
         )
         .await
-        .map_err(|e| format!("не удалось скачать обновление: {e}"))?;
+        .map_err(|e| failure("не удалось скачать обновление", &e.to_string()))?;
 
     // «что нового» покажем один раз после перезапуска уже в новой версии
     remember_notes(&app, &update.version, update.body.as_deref().unwrap_or(""));
@@ -130,12 +163,12 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
         std::process::Command::new(exe)
             .args(["--after-update", &std::process::id().to_string()])
             .spawn()
-            .map_err(|e| format!("не удалось перезапустить: {e}"))?;
+            .map_err(|e| failure("не удалось перезапустить", &e.to_string()))?;
         app.exit(0);
     } else {
         crate::log(format!("обновление до {}: запуск установщика", update.version));
         // установщик закрывает программу, обновляет и запускает её снова
-        update.install(bytes).map_err(|e| format!("не удалось запустить установщик: {e}"))?;
+        update.install(bytes).map_err(|e| failure("не удалось запустить установщик", &e.to_string()))?;
     }
     Ok(())
 }
