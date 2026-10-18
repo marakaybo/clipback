@@ -7,6 +7,7 @@
 
 pub mod aac;
 pub mod audio;
+mod audio_watch;
 pub mod capture;
 pub mod convert;
 pub mod cursor;

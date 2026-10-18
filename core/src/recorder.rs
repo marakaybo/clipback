@@ -6,6 +6,7 @@ use crate::capture::{texture_desc, Duplicator, Frame};
 use crate::convert::{create_frame_texture, Converter};
 use crate::encoder::{Encoder, EncoderSettings};
 use crate::gpu::{self, Gpu};
+use crate::audio_watch::AudioWatch;
 use crate::mixer::{self, AudioConfig};
 use crate::live::{LiveRec, Msg};
 use crate::ring::Ring;
@@ -214,11 +215,11 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
     let start = Instant::now();
     let t0 = crate::audio::qpc_now();
     let (atx, arx) = mpsc::channel();
-    let (hub, audio_error) = match mixer::start(&cfg.audio, t0, atx) {
+    let (mut hub, audio_error) = match mixer::start(&cfg.audio, t0, atx.clone()) {
         Ok(h) => (h, None),
         Err(e) => (None, Some(format!("{e:#}"))),
     };
-    let _hub = &hub;
+    let mut audio_watch = AudioWatch::new();
     let tracks = hub.as_ref().map(|h| h.tracks.clone()).unwrap_or_default();
     let track_list = tracks.clone();
     ring.set_audio_tracks(tracks.len());
@@ -437,6 +438,18 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
                             stale.as_secs_f64(),
                         ));
                     }
+                }
+            }
+            // поток звука упал — перезапускаем звук с тем же отсчётом времени (дорожки те же,
+            // пропуск в буфере и в записи заполнится тишиной); захват экрана не трогаем
+            if hub.as_ref().is_some_and(|h| !h.alive()) && audio_watch.dead(Instant::now()) {
+                hub = None;
+                match mixer::start(&cfg.audio, t0, atx.clone()) {
+                    Ok(h) => {
+                        crate::util::log(format!("звук: поток звука остановился — перезапустил (раз подряд: {})", audio_watch.restarts()));
+                        hub = h;
+                    }
+                    Err(e) => crate::util::log(format!("звук: поток звука остановился, перезапуск не удался: {e:#}")),
                 }
             }
             if dup.keeps_losing() {

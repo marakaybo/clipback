@@ -146,6 +146,13 @@ pub struct AudioHub {
     pub tracks: Vec<String>,
 }
 
+impl AudioHub {
+    /// Поток сведения работает. Если нет (паника, умер источник) — звук нужно перезапустить.
+    pub fn alive(&self) -> bool {
+        self.thread.as_ref().is_some_and(|t| !t.is_finished())
+    }
+}
+
 impl Drop for AudioHub {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -408,6 +415,12 @@ fn mixer_loop(lay: Layout, mut encoders: Vec<AacEncoder>, t0: i64, out: Sender<(
     let mut track_secs = vec![0f64; lay.tracks.len()];
 
     while !stop.load(Ordering::Relaxed) {
+        // поток источника сам не завершается, пока не попросили (ошибки он переживает сам);
+        // завершился — значит, упал: выходим, и рекордер перезапустит звук целиком
+        if let Some(i) = handles.iter().position(|h| h.is_finished()) {
+            crate::util::log(format!("звук ({}): поток источника завершился", lay.sources[i].kind.describe()));
+            break;
+        }
         match rx.recv_timeout(Duration::from_millis(20)) {
             Ok(c) => {
                 let now = Instant::now();
