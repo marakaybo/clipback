@@ -680,7 +680,8 @@ fn show_main(app: &AppHandle) {
         let _ = w.show();
         let _ = w.set_focus();
     }
-    // пока окно было спрятано, тики буфера ему не шли
+    // пока окно было спрятано, тики буфера и список клипов ему не обновлялись
+    let _ = app.emit_to("main", "main-shown", ());
     emit_state(app);
 }
 

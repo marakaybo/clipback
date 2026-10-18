@@ -2316,11 +2316,24 @@ function main() {
     S.state.diskFree = x.diskFree;
     renderState(true);
   });
-  api.on("clips-changed", () => loadClips());
+  // спрятанное окно (оверлей, главное в трее) список не перечитывает — только когда его покажут
+  let winHidden = MODE === "overlay";
+  let clipsDirty = false;
+  const clipsChanged = () => {
+    if (winHidden) clipsDirty = true;
+    else loadClips();
+  };
+  const winShown = () => {
+    winHidden = false;
+    if (clipsDirty) { clipsDirty = false; loadClips(); }
+  };
+  api.on("clips-changed", clipsChanged);
+  api.on("main-shown", winShown);
+  window.addEventListener("focus", winShown);
   api.on("clip-saved", (path) => {
     if (MODE === "browser") toast("Повтор сохранён", "", "replay");
     S.pendingSelect = path;
-    loadClips();
+    clipsChanged();
   });
   api.on("overlay-will-show", () => document.documentElement.classList.remove("overlay-open"));
   api.on("overlay-shown", () => {
@@ -2331,15 +2344,17 @@ function main() {
     }
     // два кадра: окно успевает показаться прозрачным, потом интерфейс плавно проявляется
     requestAnimationFrame(() => requestAnimationFrame(() => document.documentElement.classList.add("overlay-open")));
+    winHidden = false;
+    clipsDirty = false;
     loadClips();
   });
   api.on("overlay-hide", () => {
     document.documentElement.classList.remove("overlay-open");
     setPlaying(false);
   });
-  api.on("overlay-hidden", () => setPlaying(false));
+  api.on("overlay-hidden", () => { winHidden = true; setPlaying(false); });
   // главное окно закрыли в трей или свернули — видео не должно играть дальше
-  api.on("main-hidden", () => setPlaying(false));
+  api.on("main-hidden", () => { winHidden = true; setPlaying(false); });
   // щелчок мимо окна Clipback закрывает оверлей
   $("#backdrop").addEventListener("pointerdown", () => call("hide_overlay_cmd"));
 

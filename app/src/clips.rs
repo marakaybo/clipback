@@ -116,6 +116,28 @@ pub fn entry(p: &Path) -> Result<ClipEntry> {
     Ok(e)
 }
 
+/// Разобранные заголовки MP4: (размер, время изменения) → запись. Список клипов просят
+/// после каждого сохранения, обрезки и удаления — без кэша каждый раз читались бы
+/// заголовки всех файлов (сотни клипов на HDD).
+static CACHE: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, (u64, std::time::SystemTime, ClipEntry)>>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn cached_entry(p: &Path) -> Option<ClipEntry> {
+    let meta = std::fs::metadata(p).ok()?;
+    let key = p.to_string_lossy().into_owned();
+    let stamp = (meta.len(), meta.modified().ok()?);
+    if let Some((len, t, e)) = CACHE.lock().ok()?.get(&key) {
+        if (*len, *t) == stamp {
+            return Some(e.clone());
+        }
+    }
+    let e = entry(p).ok()?;
+    if let Ok(mut c) = CACHE.lock() {
+        c.insert(key, (stamp.0, stamp.1, e.clone()));
+    }
+    Some(e)
+}
+
 /// Все клипы в папке и в папках игр внутри неё (один уровень), новые сверху.
 pub fn list(dir: &Path) -> Vec<ClipEntry> {
     // Скрытые папки (корзина `.clipback-trash`) и файлы с точкой не показываем.
@@ -131,8 +153,13 @@ pub fn list(dir: &Path) -> Vec<ClipEntry> {
         .cloned()
         .chain(nested)
         .filter(|p| p.is_file() && kind_of(p).is_some())
-        .filter_map(|p| entry(&p).ok())
+        .filter_map(|p| cached_entry(&p))
         .collect();
+    // забываем файлы, которых больше нет (кэш не растёт бесконечно)
+    if let Ok(mut c) = CACHE.lock() {
+        let seen: std::collections::HashSet<&str> = v.iter().map(|e| e.path.as_str()).collect();
+        c.retain(|k, _| seen.contains(k.as_str()));
+    }
     v.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| b.name.cmp(&a.name)));
     v
 }
