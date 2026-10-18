@@ -521,6 +521,7 @@ body.grabbing, body.grabbing * { cursor: grabbing !important; }
 .switch.xs span::after { left: 2px; top: 2px; width: 10px; height: 10px; }
 .switch.xs input:checked + span::after { transform: translateX(10px); }
 
+.export-why { margin: 0 var(--sp-3) var(--sp-2); text-align: center; }
 .progress { margin: 0 12px 10px; height: 4px; border-radius: 2px; background: var(--s4); overflow: hidden; flex: none; }
 .progress-fill { height: 100%; width: 0; background: var(--accent); transition: width .15s linear; }
 
