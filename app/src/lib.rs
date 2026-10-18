@@ -5,6 +5,7 @@ mod clips;
 mod indicator;
 mod library;
 mod nvidia;
+mod power;
 mod settings;
 mod sound;
 mod trash;
@@ -1489,6 +1490,7 @@ pub fn run() {
             create_windows(&handle, start_hidden)?;
             sync_autostart(&handle);
             watch_mic(handle.clone());
+            power::start(&handle);
             winutil::install_drag_cursors();
             build_tray(&handle)?;
             register_hotkeys(&handle);

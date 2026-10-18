@@ -118,7 +118,7 @@ mod tests {
             for x in 0..w {
                 seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
                 let n = (seed >> 24) as u8 / 8;
-                rgba.extend_from_slice(&[(x * 255 / w) as u8 + n, (y * 255 / h) as u8, 128 + n, 255]);
+                rgba.extend_from_slice(&[((x * 255 / w) as u8).saturating_add(n), (y * 255 / h) as u8, 128 + n, 255]);
             }
         }
         let img = RawImage { rgba, width: w, height: h };

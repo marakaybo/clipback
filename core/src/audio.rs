@@ -369,7 +369,16 @@ pub fn spawn_source(index: usize, kind: SourceKind, t0: i64, out: Sender<Chunk>,
             let mut diag = Diag::new();
             let mut last_err = String::new();
             while !stop.load(Ordering::Relaxed) {
-                match run_source(index, &kind, t0, &out, &stop, &mut placer, &mut diag) {
+                // паника внутри захвата не должна молча убить источник: считаем её ошибкой
+                // и открываем источник заново (текст паники уже в журнале)
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_source(index, &kind, t0, &out, &stop, &mut placer, &mut diag)
+                }))
+                .unwrap_or_else(|_| {
+                    placer = Placer::new();
+                    Err(anyhow::anyhow!("сбой потока звука — открываю заново"))
+                });
+                match r {
                     Ok(()) => last_err.clear(),
                     Err(e) => {
                         // одну и ту же ошибку пишем в журнал один раз
