@@ -96,7 +96,7 @@ fn records_saves_and_trims() {
 
     // буфер длиной 3 с: ждём больше, чтобы проверить, что лишнее выбрасывается
     std::thread::sleep(Duration::from_millis(4500));
-    rec.sender().send(Command::Save { seconds: None, label: Some("hw-test".into()) }).unwrap();
+    rec.sender().send(Command::Save { seconds: None, label: Some("hw-test".into()), dir: None }).unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(15);
     let path = loop {
