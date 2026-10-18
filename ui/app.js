@@ -24,6 +24,18 @@ function mb(bytes) {
   return `${m.toFixed(1)} МБ`;
 }
 
+// Буфер повтора живёт в памяти: оценка размера и предупреждение, если он займёт
+// больше четверти памяти компьютера (игре самой нужна память). Звук — 160 кбит/с на дорожку.
+const RAM_SHARE = 0.25;
+function bufferMem(mbps, minutes, tracks, total) {
+  const bytes = ((mbps * 1e6 + tracks * 160000) / 8) * minutes * 60;
+  const warn = !!total && bytes > total * RAM_SHARE;
+  const text = warn
+    ? `≈ ${mb(bytes)} памяти — много для этого ПК (${Math.round(total / 2 ** 30)} ГБ), игре может не хватить. Уменьшите длину или качество`
+    : `≈ ${mb(bytes)} памяти`;
+  return { bytes, warn, text };
+}
+
 function plural(n, [one, few, many]) {
   const a = n % 10, b = n % 100;
   if (a === 1 && b !== 11) return one;
@@ -240,7 +252,14 @@ function main() {
     // плашка с проблемой
     const banner = $("#banner");
     const action = $("#banner-action");
-    if (st.error) {
+    if (st.folderProblem) {
+      // диск с клипами отключён или нет прав — буфер работает, сохранять некуда
+      banner.hidden = false;
+      $("#banner-text").textContent = st.folderProblem;
+      action.hidden = false;
+      action.textContent = "Выбрать папку";
+      action.onclick = pickOutDir;
+    } else if (st.error) {
       banner.hidden = false;
       $("#banner-text").textContent = `Запись не работает: ${st.error}`;
       action.hidden = false;
@@ -1751,13 +1770,21 @@ function main() {
 
   const perMinute = (mbps) => mb((mbps * 1e6 / 8) * 60);
 
+  function showBufMem(s, minutes) {
+    const tracks = (S.state.capture && S.state.capture.audio && S.state.capture.audio.length) || 1;
+    const m = bufferMem(bitrate(s), minutes, tracks, S.state.memTotal);
+    const el = $("#buf-mem");
+    el.textContent = m.text;
+    el.classList.toggle("warn-text", m.warn);
+  }
+
   function fillSettings() {
     const st = S.state;
     if (!st) return;
     const s = st.settings;
     $("#set-buffer").value = Math.round(s.bufferMinutes * 2);
     $("#set-buffer-val").textContent = `${s.bufferMinutes} мин`;
-    $("#buf-mem").textContent = `Займёт в памяти ≈ ${mb((bitrate(s) * 1e6 / 8) * s.bufferMinutes * 60)}`;
+    showBufMem(s, s.bufferMinutes);
     $("#set-record-on-start").checked = s.recordOnStart;
     $("#set-autostart").checked = s.autostart;
     $("#set-close-to-tray").checked = s.closeToTray;
@@ -1836,7 +1863,7 @@ function main() {
   $("#set-buffer").addEventListener("input", (e) => {
     const m = e.target.value / 2;
     $("#set-buffer-val").textContent = `${m} мин`;
-    $("#buf-mem").textContent = `Займёт в памяти ≈ ${mb((bitrate(S.state.settings) * 1e6 / 8) * m * 60)}`;
+    showBufMem(S.state.settings, m);
   });
   $("#set-buffer").addEventListener("change", (e) => saveSettings({ bufferMinutes: e.target.value / 2 }));
   $("#set-record-on-start").addEventListener("change", (e) => saveSettings({ recordOnStart: e.target.checked }));
@@ -2130,10 +2157,11 @@ function main() {
   $("#refresh-apps").onclick = refreshApps;
 
   $("#set-outdir-open").onclick = () => call("open_clips_folder", {}, "Не удалось открыть папку");
-  $("#set-outdir-pick").onclick = async () => {
+  async function pickOutDir() {
     const p = await call("pick_folder", {}, "Не удалось выбрать папку");
     if (p) await saveSettings({ outDir: p });
-  };
+  }
+  $("#set-outdir-pick").onclick = pickOutDir;
   $("#btn-quit").onclick = async () => {
     if (await confirmBox("Выйти из Clipback?", "Запись буфера остановится. Уже сохранённые клипы останутся.", "Выйти")) call("quit_app");
   };

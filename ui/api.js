@@ -77,7 +77,15 @@
     error: null, lastGame: "Battlefield 6", hotkeyErrors: [], settings, version: "0.1.0", portable: true,
     // ?blocked — показать плашку «игра не попадает в запись»
     captureBlocked: location.search.includes("blocked") ? { game: "Minecraft 26.1.2", exe: "javaw.exe", nvidia: true, driverOk: false } : null,
+    // ?nodrive — диск с клипами отключён, ?lowdisk — мало места, ?lowmem — 8 ГБ памяти и буфер 20 мин
+    folderProblem: location.search.includes("nodrive")
+      ? "Диск G: не найден — клипы некуда сохранять (G:\\MEDIA+\\клипы ClipBack). Подключите диск или выберите другую папку. Буфер записи продолжает работать."
+      : null,
+    diskFree: location.search.includes("lowdisk") ? 1.2e9 : 412e9,
+    memTotal: location.search.includes("lowmem") ? 8 * 2 ** 30 : 32 * 2 ** 30,
   };
+  if (location.search.includes("nodrive")) settings.outDir = "G:\\MEDIA+\\клипы ClipBack";
+  if (location.search.includes("lowmem")) settings.bufferMinutes = 20;
   const started = Date.now();
   setInterval(() => {
     if (!state.recording) return;
@@ -255,8 +263,13 @@
       if (load.hc.length > 120) (load.hc.shift(), load.hg.shift());
       return { cpuHistory: load.hc, gpuHistory: load.hg, cpu: load.cpu, gpu: load.gpu, vramUsed: load.vram, vramTotal: 15.7 * 1024 ** 3, ramUsed: 16.3 * 1024 ** 3, ramTotal: 31.8 * 1024 ** 3, gpuName: "NVIDIA GeForce RTX 5060 Ti", gpuTemp: Math.round(60 + load.gpu / 12) };
     },
-    set_settings: ({ settings: s }) => { Object.assign(settings, s); emit("state", state); return settings; },
-    pick_folder: () => null,
+    set_settings: ({ settings: s }) => {
+      if (s.outDir && s.outDir !== settings.outDir) state.folderProblem = null;
+      Object.assign(settings, s);
+      emit("state", state);
+      return settings;
+    },
+    pick_folder: () => (state.folderProblem ? "D:\\Клипы" : null),
     hide_overlay_cmd: () => { document.body.classList.add("closed"); document.documentElement.classList.remove("overlay-open"); },
     show_main_cmd: () => {},
     reveal_clip: () => {}, open_clips_folder: () => {}, copy_clip: () => {}, frontend_log: () => {}, quit_app: () => {},

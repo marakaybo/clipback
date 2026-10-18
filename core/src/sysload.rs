@@ -107,6 +107,13 @@ impl Drop for Sampler {
     }
 }
 
+/// Сколько всего оперативной памяти в компьютере (байты).
+pub fn total_ram() -> Option<u64> {
+    let mut m = MEMORYSTATUSEX { dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
+    unsafe { GlobalMemoryStatusEx(&mut m).ok()? };
+    (m.ullTotalPhys > 0).then_some(m.ullTotalPhys)
+}
+
 /// (занято, всего) процессорного времени с запуска системы, в 100 нс.
 fn cpu_times() -> Option<(u64, u64)> {
     let (mut idle, mut kernel, mut user) = (FILETIME::default(), FILETIME::default(), FILETIME::default());
