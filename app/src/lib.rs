@@ -1099,9 +1099,13 @@ async fn delete_clips(app: AppHandle, paths: Vec<String>) -> Res<DeleteOut> {
     let a = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(trash::UNDO_SECS));
-        for p in st(&a).trash.finalize(batch) {
-            favs(&a).set(&p, false);
-            hidden(&a).set(&p, false);
+        let gone = st(&a).trash.finalize(batch);
+        for p in &gone {
+            favs(&a).set(p, false);
+            hidden(&a).set(p, false);
+        }
+        if !gone.is_empty() {
+            clips_changed(&a);
         }
     });
     Ok(DeleteOut { batch, count: done.len(), bytes, errors })
@@ -1265,6 +1269,8 @@ fn set_settings(app: AppHandle, settings: Settings) -> Res<Settings> {
         let _ = app.asset_protocol_scope().allow_directory(&new.out_dir, true);
         storage::recheck(&app);
         clips_changed(&app);
+        let dir = new.out_dir.clone();
+        std::thread::spawn(move || trash::flush_leftovers(&dir));
     }
     if (&old.hotkey_overlay, &old.hotkey_save, &old.hotkey_screenshot, &old.hotkey_record)
         != (&new.hotkey_overlay, &new.hotkey_save, &new.hotkey_screenshot, &new.hotkey_record)

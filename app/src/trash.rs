@@ -123,7 +123,19 @@ impl Trash {
 }
 
 /// Остатки от прошлого запуска (программу закрыли до истечения времени) — в корзину.
+/// Смотрим и папку клипов, и папки игр внутри неё.
 pub fn flush_leftovers(out_dir: &Path) {
+    flush_dir(out_dir);
+    if let Ok(rd) = std::fs::read_dir(out_dir) {
+        for e in rd.flatten() {
+            if e.path().is_dir() && e.file_name() != DIR {
+                flush_dir(&e.path());
+            }
+        }
+    }
+}
+
+fn flush_dir(out_dir: &Path) {
     let d = out_dir.join(DIR);
     let Ok(rd) = std::fs::read_dir(&d) else { return };
     for e in rd.flatten() {

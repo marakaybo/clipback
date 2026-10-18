@@ -118,8 +118,11 @@ pub fn entry(p: &Path) -> Result<ClipEntry> {
 
 /// Все клипы в папке и в папках игр внутри неё (один уровень), новые сверху.
 pub fn list(dir: &Path) -> Vec<ClipEntry> {
+    // Скрытые папки (корзина `.clipback-trash`) и файлы с точкой не показываем.
     let files = |d: &Path| -> Vec<PathBuf> {
-        std::fs::read_dir(d).map(|rd| rd.flatten().map(|e| e.path()).collect()).unwrap_or_default()
+        std::fs::read_dir(d)
+            .map(|rd| rd.flatten().filter(|e| !e.file_name().to_string_lossy().starts_with('.')).map(|e| e.path()).collect())
+            .unwrap_or_default()
     };
     let top = files(dir);
     let nested = top.iter().filter(|p| p.is_dir()).flat_map(|d| files(d));
@@ -328,6 +331,11 @@ mod tests {
         assert!(!inside.to_string_lossy().starts_with(r"\\?\"), "путь должен быть обычным: {}", inside.display());
         assert!(ensure_inside(&dir, &dir.join("notes.txt")).is_err());
         assert!(ensure_inside(&dir, &std::env::temp_dir()).is_err());
+
+        // клип, ждущий корзины, в списке не появляется
+        std::fs::create_dir_all(dir.join(crate::trash::DIR)).unwrap();
+        std::fs::write(dir.join(crate::trash::DIR).join("7-old.mp4"), b"x").unwrap();
+        assert_eq!(list(&dir).len(), 2);
         assert!(ensure_inside(&dir, &dir.join("..").join("clipback-app-test-list").join("shot.png")).is_ok());
     }
 
