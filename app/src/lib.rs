@@ -1635,7 +1635,25 @@ fn show_main_cmd(app: AppHandle) {
 
 #[tauri::command]
 fn frontend_log(window: tauri::Window, message: String) {
-    log(format!("[{}] {}", window.label(), message.chars().take(2000).collect::<String>()));
+    // ошибка в цикле отрисовки повторялась бы каждые 120 мс: одинаковые сообщения — раз
+    // в минуту, всего не больше 30 в минуту
+    static SEEN: Mutex<(Option<Instant>, u32, Vec<(String, Instant)>)> = Mutex::new((None, 0, Vec::new()));
+    let line = format!("[{}] {}", window.label(), message.chars().take(2000).collect::<String>());
+    {
+        let mut g = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        let (minute, count, recent) = &mut *g;
+        if minute.is_none_or(|t| t.elapsed() >= Duration::from_secs(60)) {
+            *minute = Some(Instant::now());
+            *count = 0;
+        }
+        recent.retain(|(_, t)| t.elapsed() < Duration::from_secs(60));
+        if *count >= 30 || recent.iter().any(|(m, _)| *m == line) {
+            return;
+        }
+        *count += 1;
+        recent.push((line.clone(), Instant::now()));
+    }
+    log(line);
 }
 
 #[tauri::command]
