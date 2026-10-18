@@ -1387,17 +1387,34 @@ async fn save_edited_image(app: AppHandle, path: String, png_base64: String, rep
     Ok(e)
 }
 
+/// Новая папка клипов: полный путь, создаётся и в неё можно писать.
+fn check_out_dir(dir: &Path) -> Res<()> {
+    if dir.as_os_str().is_empty() || !dir.is_absolute() {
+        return Err("папка клипов: укажите полный путь, например D:\\Клипы".into());
+    }
+    std::fs::create_dir_all(dir).map_err(|e| format!("папка клипов не создаётся: {e}"))?;
+    let probe = dir.join(".clipback-write-test");
+    std::fs::write(&probe, b"ok").map_err(|e| format!("в папку клипов нельзя записывать: {e}"))?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
+}
+
 #[tauri::command]
 fn set_settings(app: AppHandle, settings: Settings) -> Res<Settings> {
     let mut new = settings.sanitized();
-    let (old, path) = {
-        let mut i = lock(&app);
+    let path = st(&app).settings_path.clone();
+    {
+        let i = lock(&app);
         // замки громкости меняет только микшер (widgets.rs): окно настроек могло прислать старые
         new.volume_locks = i.settings.volume_locks.clone();
-        let old = std::mem::replace(&mut i.settings, new.clone());
-        (old, st(&app).settings_path.clone())
-    };
+        if i.settings.out_dir != new.out_dir {
+            drop(i);
+            check_out_dir(&new.out_dir)?;
+        }
+    }
+    // сначала на диск: не сохранилось — программа остаётся со старыми настройками
     new.save(&path).map_err(|e| format!("не удалось сохранить настройки: {e:#}"))?;
+    let old = std::mem::replace(&mut lock(&app).settings, new.clone());
 
     if old.out_dir != new.out_dir {
         let _ = std::fs::create_dir_all(&new.out_dir);
