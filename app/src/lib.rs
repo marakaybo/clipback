@@ -1552,6 +1552,11 @@ fn watch_mic(app: AppHandle) {
                 heard = 0;
                 continue;
             }
+            // перебор устройств нужен только к пятой минуте тишины (три замера до предупреждения),
+            // а не каждые 5 с с двадцатой секунды
+            if mic.zero_secs < 280.0 {
+                continue;
+            }
             let peak = clipback_core::audio::list_mics()
                 .ok()
                 .and_then(|l| l.into_iter().find(|d| device.as_ref().map_or(d.is_default, |id| &d.id == id)))
