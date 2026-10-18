@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # у core и app раздельные Cargo.lock и target — кэшируем оба
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            core
+            app
+
+      # тесты с железом (захват экрана, кодеки) помечены #[ignore] и здесь не запускаются
+      - name: Тесты core
+        working-directory: core
+        run: cargo test
+
+      - name: Тесты app
+        working-directory: app
+        run: cargo test
+
+      - name: Тесты интерфейса
+        run: |
+          node ui/tests/names.test.js ui/app.js
+          node ui/tests/notes.test.js
+
+      # подсказки, на результат не влияют
+      - name: Clippy core
+        working-directory: core
+        continue-on-error: true
+        run: cargo clippy --all-targets
+
+      - name: Clippy app
+        working-directory: app
+        continue-on-error: true
+        run: cargo clippy --all-targets

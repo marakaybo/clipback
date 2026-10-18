@@ -568,6 +568,7 @@
             <div><b id="upd-title">Версия</b><small id="upd-note">Проверка ещё не выполнялась</small></div>
             <div class="row-btns">
               <button class="btn btn-ghost" id="upd-check">Проверить</button>
+              <button class="btn btn-ghost" id="upd-manual" hidden>Скачать вручную</button>
               <button class="btn btn-primary" id="upd-install" hidden>Обновить</button>
             </div>
           </div>
@@ -576,6 +577,11 @@
           <div class="opt">
             <div><b>Проверять при запуске</b><small>Без вашего согласия ничего не скачивается</small></div>
             <label class="switch"><input type="checkbox" id="set-check-updates"><span></span></label>
+          </div>
+          <h3>Поддержка</h3>
+          <div class="opt">
+            <div><b>Отчёт для разработчика</b><small>Один файл с журналом и сведениями о компьютере. Личные пути убраны, в интернет ничего не уходит</small></div>
+            <button class="btn btn-ghost" id="btn-report">Сохранить отчёт</button>
           </div>
           <p class="muted small-note" id="about">Clipback · открытый код · GPL-3.0 · <span id="about-kind"></span></p>
         </section>

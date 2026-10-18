@@ -1933,6 +1933,7 @@ function main() {
     };
     $("#upd-note").textContent = notes[upd.state];
     $("#upd-check").disabled = upd.state === "checking" || upd.state === "loading";
+    $("#upd-manual").hidden = upd.state !== "error";
     $("#upd-install").hidden = !(upd.state === "available" || upd.state === "loading");
     $("#upd-install").disabled = upd.state === "loading";
     if (upd.state !== "loading") $("#upd-progress").hidden = true;
@@ -1956,6 +1957,15 @@ function main() {
     renderUpdate();
   }
   $("#upd-check").onclick = checkUpdate;
+  $("#upd-manual").onclick = () => api.call("open_releases_page").catch(() => {});
+  $("#btn-report").onclick = async () => {
+    try {
+      const path = await api.call("save_report");
+      if (path) toast("Отчёт сохранён", "Пришлите этот файл разработчику", "info", { label: "Показать в папке", run: () => call("reveal_report", { path }, "Не удалось открыть папку") });
+    } catch (e) {
+      toast("Не удалось сохранить отчёт", String(e), "error");
+    }
+  };
   $("#upd-install").onclick = async () => {
     upd.state = "loading";
     renderUpdate();

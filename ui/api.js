@@ -137,7 +137,7 @@
       state.recordStarted = state.recordStarted ? null : Date.now();
       emit("state", state);
     },
-    check_update: () => new Promise((r) => setTimeout(() => r({ version: "0.4.0", notes: "**Новое**\n- **Перетаскивание** клипа в Discord\n- Сжатие под лимит `Discord`\n  - 10, 20, 50 или 500 МБ\n\n**Исправлено**\n- Папка открывается поверх оверлея", portable: true }), 600)),
+    check_update: () => new Promise((r, j) => setTimeout(() => location.search.includes("updfail") ? j("не удалось проверить обновления: нет связи с GitHub — проверьте интернет") : r({ version: "0.4.0", notes: "**Новое**\n- **Перетаскивание** клипа в Discord\n- Сжатие под лимит `Discord`\n  - 10, 20, 50 или 500 МБ\n\n**Исправлено**\n- Папка открывается поверх оверлея", portable: true }), 600)),
     take_whats_new: () => null,
     copy_image: () => {},
     mic_blocked: () => false,
@@ -161,6 +161,9 @@
     set_favorite: ({ path, on }) => { find(path).favorite = on; },
     set_hidden: ({ path, on }) => { find(path).hidden = on; },
     clean_preview: ({ maxGb }) => ({ count: maxGb && maxGb < 5 ? 3 : 0, bytes: 2.1e9 }),
+    open_releases_page: () => { window.open("https://github.com/marakaybo/clipback/releases/latest", "_blank"); },
+    save_report: () => new Promise((r) => setTimeout(() => r("C:\Users\Player\Desktop\clipback-report-2026-10-18_12-00-00.zip"), 500)),
+    reveal_report: () => {},
     install_update: () => new Promise((r) => {
       let done = 0;
       const t = setInterval(() => {

@@ -17,7 +17,8 @@ param(
     [string]$Key = "$env:USERPROFILE\.tauri\clipback.key",
     [string]$Repo = "marakaybo/clipback",
     [string]$Notes = "",
-    [string]$NotesFile = ""
+    [string]$NotesFile = "",
+    [switch]$SkipClippy
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,6 +37,13 @@ $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content $Key -Raw
 $pwFile = "$Key.password"
 $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = if (Test-Path $pwFile) { (Get-Content $pwFile -Raw).Trim() } else { "" }
 
+# подсказки clippy — только для сведения, на выпуск не влияют
+if (-not $SkipClippy) {
+    Push-Location $app
+    try { cargo clippy --quiet 2>&1 | Select-Object -Last 15 } catch { } finally { Pop-Location }
+    $global:LASTEXITCODE = 0
+}
+
 # установщик (+ подпись .sig)
 Push-Location $app
 try {
@@ -46,6 +54,9 @@ try {
 $nsisDir = Join-Path $app "target\release\bundle\nsis"
 $setupSrc = Join-Path $nsisDir "Clipback_${version}_x64-setup.exe"
 if (-not (Test-Path $setupSrc)) { throw "не найден установщик $setupSrc" }
+# версия внутри exe (Свойства -> Подробно) должна совпадать с выпускаемой
+$exeVer = (Get-Item (Join-Path $app "targetelease\clipback.exe")).VersionInfo.FileVersion
+if ($exeVer -ne $version) { throw "в exe версия $exeVer, а выпускается $version — пересоберите (cargo clean -p clipback)" }
 
 if (Test-Path $dist) { Remove-Item $dist -Recurse -Force }
 New-Item -ItemType Directory $dist | Out-Null
