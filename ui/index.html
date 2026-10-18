@@ -36,7 +36,7 @@
       <div class="brand">Clipback</div>
 
       <div class="status" id="status">
-        <label class="switch sm" title="Запись буфера"><input type="checkbox" id="rec-switch"><span></span></label>
+        <label class="switch sm" title="Запись буфера"><input type="checkbox" id="rec-switch" aria-label="Запись буфера"><span></span></label>
         <span class="status-main" id="status-main">Запуск…</span>
         <span class="status-source" id="source-label"></span>
       </div>
@@ -82,7 +82,7 @@
       <aside class="clips panel">
         <div class="panel-head">
           <span>Клипы</span>
-          <div class="seg" id="clip-filter">
+          <div class="seg" id="clip-filter" role="group" aria-label="Тип">
             <button class="seg-btn active" data-f="all">Все</button>
             <button class="seg-btn" data-f="video">Видео</button>
             <button class="seg-btn" data-f="shot">Фото</button>
@@ -139,10 +139,10 @@
             <div class="veil" id="veil">
               <div class="veil-icon"><svg viewBox="0 0 24 24"><path d="M3 3l18 18"/><path d="M10.6 5.1A10 10 0 0 1 12 5c5 0 9 4.5 10 7a14 14 0 0 1-3.2 4.2M6.6 6.6A14 14 0 0 0 2 12c1 2.5 5 7 10 7a9.6 9.6 0 0 0 4.4-1.1"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg></div>
               <b>Скрытая запись</b>
-              <span>Превью размыто, чтобы её случайно никто не увидел</span>
+              <span>Превью размыто от чужих глаз</span>
               <button class="btn btn-accent" id="veil-show">Показать</button>
             </div>
-            <button class="big-play" id="big-play" title="Пробел"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
+            <button class="big-play" id="big-play" title="Воспроизвести (Пробел)"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
           </div>
 
           <div class="shot-bar" id="shot-bar">
@@ -154,7 +154,6 @@
               <svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg>
               <span>Копировать</span>
             </button>
-            <span class="muted shot-hint">Рисование, текст, стрелки, пикселизация и обрезка</span>
           </div>
 
           <!-- полоса перемотки — видна во весь экран, где нет таймлайна -->
@@ -165,7 +164,7 @@
           </div>
 
           <div class="controls" id="controls">
-            <button class="icon-btn" id="btn-play" title="Пробел"><svg viewBox="0 0 24 24" id="play-icon"><path d="M8 5v14l11-7z"/></svg></button>
+            <button class="icon-btn" id="btn-play" title="Воспроизвести / пауза (Пробел)"><svg viewBox="0 0 24 24" id="play-icon"><path d="M8 5v14l11-7z"/></svg></button>
             <button class="icon-btn sm" id="btn-back" title="−5 с (←)"><svg viewBox="0 0 24 24"><path d="M11 17l-5-5 5-5M18 17l-5-5 5-5"/></svg></button>
             <button class="icon-btn sm" id="btn-fwd" title="+5 с (→)"><svg viewBox="0 0 24 24"><path d="M13 17l5-5-5-5M6 17l5-5-5-5"/></svg></button>
             <div class="timecode"><span id="tc-cur">0:00.00</span><span class="tc-sep">/</span><span id="tc-dur">0:00.00</span></div>
@@ -174,7 +173,7 @@
               <button class="icon-btn sm" id="btn-mute" title="Звук (M)"><svg viewBox="0 0 24 24" id="vol-icon"><path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M16 9a4 4 0 0 1 0 6"/></svg></button>
               <input type="range" id="vol" min="0" max="100" value="80" title="Громкость">
             </div>
-            <div class="seg small" id="speed">
+            <div class="seg small" id="speed" role="group" aria-label="Скорость">
               <button class="seg-btn" data-s="0.25">0.25×</button>
               <button class="seg-btn" data-s="0.5">0.5×</button>
               <button class="seg-btn active" data-s="1">1×</button>
@@ -286,7 +285,7 @@
             <button class="chip" data-mb="20" title="Бесплатный Discord (2026)">20 МБ</button>
             <button class="chip" data-mb="50" title="Nitro Basic">50 МБ</button>
             <button class="chip" data-mb="500" title="Nitro">500 МБ</button>
-            <label class="size-own" title="Свой лимит"><input type="number" id="discord-own" min="1" max="10000" step="1"><span>МБ</span></label>
+            <label class="size-own" title="Свой лимит"><input type="number" id="discord-own" min="1" max="10000" step="1" aria-label="Свой лимит, МБ"><span>МБ</span></label>
           </div>
           <div class="hint" id="quality-hint"></div>
         </div>
@@ -299,6 +298,7 @@
         </div>
 
         <div class="progress" id="export-progress" hidden><div class="progress-fill"></div></div>
+        <div class="hint export-why" id="export-why" hidden>Выделите кусок на таймлайне</div>
 
         <button class="btn btn-accent wide" id="btn-export">
           <svg viewBox="0 0 24 24"><path d="M5 12l4 4L19 6"/></svg>
@@ -314,7 +314,7 @@
 
   <!-- Подтверждение -->
   <div class="modal-wrap" id="whatsnew">
-    <div class="confirm whatsnew panel">
+    <div class="confirm whatsnew panel" role="dialog" aria-modal="true" aria-labelledby="whatsnew-title">
       <h3 id="whatsnew-title">Что нового</h3>
       <div class="notes" id="whatsnew-notes"></div>
       <div class="confirm-actions">
@@ -324,7 +324,7 @@
   </div>
 
   <div class="modal-wrap" id="confirm">
-    <div class="confirm panel">
+    <div class="confirm panel" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-text">
       <h3 id="confirm-title"></h3>
       <p id="confirm-text"></p>
       <label class="confirm-check" id="confirm-check-row" hidden><input type="checkbox" id="confirm-check"><span id="confirm-check-text"></span></label>
@@ -337,7 +337,7 @@
 
   <!-- Настройки -->
   <div class="modal-wrap" id="settings">
-    <div class="modal panel">
+    <div class="modal panel" role="dialog" aria-modal="true" aria-label="Настройки">
       <nav class="modal-nav">
         <div class="nav-title">Настройки</div>
         <button class="nav-item active" data-tab="record">Запись</button>
@@ -370,6 +370,14 @@
             <div><b>Включать запись при запуске</b></div>
             <label class="switch"><input type="checkbox" id="set-record-on-start"><span></span></label>
           </div>
+          <div class="opt">
+            <div><b>Курсор в записи</b></div>
+            <label class="switch"><input type="checkbox" id="set-rec-cursor"><span></span></label>
+          </div>
+          <div class="opt">
+            <div><b>Значок записи</b><small>Кружок в углу, в видео не попадает</small></div>
+            <label class="switch"><input type="checkbox" id="set-rec-indicator"><span></span></label>
+          </div>
         </section>
 
         <section class="tab" data-tab="video">
@@ -396,7 +404,7 @@
             <div class="seg" id="set-quality"><button class="seg-btn" data-v="low">Экономное</button><button class="seg-btn" data-v="medium">Среднее</button><button class="seg-btn" data-v="high">Высокое</button><button class="seg-btn" data-v="custom">Своё</button></div>
           </div>
           <div class="opt" id="custom-bitrate-row" hidden>
-            <div><b>Битрейт</b><small>Чем больше, тем чётче картинка и тяжелее файл</small></div>
+            <div><b>Битрейт</b><small>Выше — чётче, но файл больше</small></div>
             <div class="range-wrap"><input type="range" min="2" max="60" step="1" id="set-custom-bitrate"><span class="mono" id="set-custom-bitrate-val">12 Мбит/с</span></div>
           </div>
           <p class="muted small-note">При изменении буфер очистится</p>
@@ -514,7 +522,7 @@
           </div>
           <h3>Скриншоты</h3>
           <div class="opt">
-            <div><b>Копировать скриншот в буфер</b><small>Скриншот сразу в буфер обмена</small></div>
+            <div><b>Копировать скриншот в буфер</b><small>Сразу вставляется Ctrl+V</small></div>
             <label class="switch"><input type="checkbox" id="set-shot-clipboard"><span></span></label>
           </div>
           <div class="opt">
@@ -529,22 +537,6 @@
         <section class="tab" data-tab="app">
           <h2>Программа</h2>
           <div class="opt">
-            <div><b>Запускать вместе с Windows</b><small>Свёрнутой в трей, запись начнётся сама</small></div>
-            <label class="switch"><input type="checkbox" id="set-autostart"><span></span></label>
-          </div>
-          <div class="opt">
-            <div><b>Курсор в записи</b><small>Курсор виден в видео</small></div>
-            <label class="switch"><input type="checkbox" id="set-rec-cursor"><span></span></label>
-          </div>
-          <div class="opt">
-            <div><b>Значок записи</b><small>Кружок в углу экрана, в видео не попадает</small></div>
-            <label class="switch"><input type="checkbox" id="set-rec-indicator"><span></span></label>
-          </div>
-          <div class="opt">
-            <div><b>Звук при сохранении</b><small>Щелчок при сохранении и записи</small></div>
-            <label class="switch"><input type="checkbox" id="set-save-sound"><span></span></label>
-          </div>
-          <div class="opt">
             <div><b>Открывать клип</b></div>
             <select id="set-clip-start">
               <option value="start">С начала</option>
@@ -554,6 +546,15 @@
           <div class="opt">
             <div><b>Спрашивать перед удалением</b><small>Можно вернуть из корзины Windows</small></div>
             <label class="switch"><input type="checkbox" id="set-confirm-delete"><span></span></label>
+          </div>
+          <div class="opt">
+            <div><b>Звук при сохранении</b><small>Щелчок при сохранении и записи</small></div>
+            <label class="switch"><input type="checkbox" id="set-save-sound"><span></span></label>
+          </div>
+          <h3>Запуск и выход</h3>
+          <div class="opt">
+            <div><b>Запускать вместе с Windows</b><small>Свёрнутой в трей, запись начнётся сама</small></div>
+            <label class="switch"><input type="checkbox" id="set-autostart"><span></span></label>
           </div>
           <div class="opt">
             <div><b>Крестик сворачивает в трей</b><small>Запись продолжится в фоне</small></div>

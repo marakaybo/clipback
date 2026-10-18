@@ -564,9 +564,9 @@
   }
 
   function renderBar() {
-    $$("#ed-tools [data-tool]").forEach((b) => b.classList.toggle("active", b.dataset.tool === E.tool));
-    $$("#ed-colors button").forEach((b) => b.classList.toggle("active", b.dataset.color === E.color));
-    $$("#ed-sizes button").forEach((b) => b.classList.toggle("active", b.dataset.size === E.size));
+    $$("#ed-tools [data-tool]").forEach((b) => b.setAttribute("aria-pressed", b.classList.toggle("active", b.dataset.tool === E.tool)));
+    $$("#ed-colors button").forEach((b) => b.setAttribute("aria-pressed", b.classList.toggle("active", b.dataset.color === E.color)));
+    $$("#ed-sizes button").forEach((b) => b.setAttribute("aria-pressed", b.classList.toggle("active", b.dataset.size === E.size)));
     $("#ed-undo").disabled = !E.undo.length;
     $("#ed-redo").disabled = !E.redo.length;
     $("#ed-delete").hidden = !(E.sel >= 0 && E.ops[E.sel]);
@@ -582,7 +582,8 @@
     $("#ed-save-replace").disabled = !dirty;
   }
 
-  $("#ed-colors").innerHTML = COLORS.map((c, i) => `<button data-color="${c}" style="--c:${c}" title="Цвет ${i + 1}"></button>`).join("");
+  const COLOR_NAMES = ["Красный", "Жёлтый", "Зелёный", "Голубой", "Белый", "Чёрный"];
+  $("#ed-colors").innerHTML = COLORS.map((c, i) => `<button data-color="${c}" style="--c:${c}" title="${COLOR_NAMES[i]} (${i + 1})" aria-label="${COLOR_NAMES[i]}"></button>`).join("");
   $$("#ed-tools [data-tool]").forEach((b) => (b.onclick = () => setTool(b.dataset.tool)));
   $$("#ed-colors button").forEach((b) => (b.onclick = () => applyStyle({ color: b.dataset.color })));
   $$("#ed-sizes button").forEach((b) => (b.onclick = () => applyStyle({ size: b.dataset.size })));

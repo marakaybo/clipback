@@ -511,6 +511,7 @@ function main() {
     for (const el of $$("#clip-list .clip")) {
       const on = !!S.clip && el.dataset.path === S.clip.path;
       el.classList.toggle("active", on);
+      el.tabIndex = on ? 0 : -1;
       if (on) {
         found = true;
         el.scrollIntoView({ block: "nearest" });
@@ -523,6 +524,8 @@ function main() {
     renderGameFilter();
     renderPickBar();
     const box = $("#clip-list");
+    // список перерисовывается целиком — фокус клавиатуры не должен потеряться
+    const listHadFocus = box.contains(document.activeElement);
     box.innerHTML = "";
     const list = visible();
     if (!list.length) {
@@ -563,9 +566,13 @@ function main() {
       const when = parseName(c.name).when ?? c.modified;
       info.children[1].textContent = `${hhmm(when)} · ${c.kind === "shot" ? `${c.width}×${c.height} · ${/\.png$/i.test(c.path) ? "PNG" : "JPG"}` : mb(c.size)}`;
       el.title = c.name;
+      // в списке одна точка Tab — открытый клип, дальше стрелки ↑ ↓
+      el.tabIndex = S.clip && c.path === S.clip.path ? 0 : -1;
+      el.setAttribute("aria-label", `${clipTitle(c)}, ${info.children[1].textContent}${c.favorite ? ", в избранном" : ""}${c.hidden ? ", скрыта" : ""}`);
       const star = document.createElement("span");
       star.className = "star" + (c.favorite ? " on" : "");
       star.title = c.favorite ? "Убрать из избранного" : "В избранное";
+      star.setAttribute("aria-hidden", "true");
       star.innerHTML = `<svg viewBox="0 0 24 24"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/></svg>`;
       star.onpointerdown = (e) => e.stopPropagation();
       star.onclick = (e) => {
@@ -575,6 +582,7 @@ function main() {
       const bin = document.createElement("span");
       bin.className = "trash";
       bin.title = "В корзину";
+      bin.setAttribute("aria-hidden", "true");
       bin.innerHTML = `<svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>`;
       bin.onpointerdown = (e) => e.stopPropagation();
       bin.onclick = (e) => {
@@ -597,8 +605,12 @@ function main() {
       box.append(el);
       thumbObserver.observe(el);
     }
-    const act = box.querySelector(".clip.active");
-    if (act) act.scrollIntoView({ block: "nearest" });
+    const act = box.querySelector(".clip.active") || box.querySelector(".clip");
+    if (act) {
+      act.tabIndex = 0;
+      if (act.classList.contains("active")) act.scrollIntoView({ block: "nearest" });
+      if (listHadFocus) act.focus({ preventScroll: true });
+    }
   }
 
   // ---------- выбор нескольких клипов ----------
@@ -1451,6 +1463,8 @@ function main() {
     const tooLong = S.exportQuality === "discord" && !sizeFit(len, S.discordMb, exportTracks(c)).ok;
     $("#btn-export").disabled = S.busy || whole || tooLong;
     if (S.exportQuality === "discord") renderQuality(); // подсказка зависит от длины отрезка
+    // подсказка у неактивной кнопки не всплывает — причину пишем рядом
+    $("#export-why").hidden = !whole || S.busy;
     $("#btn-export").title = whole ? "Выделите на таймлайне нужный кусок, выключите дорожку, измените её громкость или выберите качество" : "Ctrl+S";
   }
 
@@ -1743,20 +1757,29 @@ function main() {
     refreshMics();
     refreshApps();
     syncMeter();
+    // клавиатура — сразу в окно настроек
+    $("#settings .nav-item.active").focus({ preventScroll: true });
   }
   function closeSettings() {
+    const hadFocus = $("#settings").contains(document.activeElement);
     $("#settings").classList.remove("open");
     stopKeyCapture();
     syncMeter();
+    if (hadFocus) $("#btn-settings").focus({ preventScroll: true });
   }
   function switchTab(tab) {
-    $$(".nav-item").forEach((x) => x.classList.toggle("active", x.dataset.tab === tab));
+    $$(".nav-item").forEach((x) => x.setAttribute("aria-current", x.classList.toggle("active", x.dataset.tab === tab) ? "page" : "false"));
     $$(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === tab));
     syncMeter();
   }
   $("#btn-settings").onclick = () => openSettings();
   $("#settings-close").onclick = closeSettings;
   $("#settings").addEventListener("pointerdown", (e) => e.target.id === "settings" && closeSettings());
+  // переключатели и ползунки в настройках называются по подписи своей строки (для экранного диктора)
+  $$("#settings .opt").forEach((o) => {
+    const name = o.querySelector("b");
+    if (name) o.querySelectorAll("input, select").forEach((i) => i.hasAttribute("aria-label") || i.setAttribute("aria-label", name.textContent));
+  });
   $$(".nav-item").forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.tab)));
 
   /// Битрейт записи, Мбит/с — как в настройках приложения (settings.rs).
@@ -2214,6 +2237,12 @@ function main() {
   );
 
   // ---------- клавиатура ----------
+  // фокус в списке клипов идёт вместе с выбором (↑ ↓)
+  function focusActiveClip() {
+    if (!$("#clip-list").contains(document.activeElement)) return;
+    const el = $("#clip-list .clip.active");
+    if (el) el.focus({ preventScroll: true });
+  }
   addEventListener("keydown", (e) => {
     if (MODE === "browser" && e.altKey && e.code === "KeyZ") {
       e.preventDefault();
@@ -2248,8 +2277,8 @@ function main() {
       case "Period": setPlaying(false); seek(S.t + 1 / fps, true); break;
       case "Home": seek(S.inT); break;
       case "End": seek(S.outT); break;
-      case "ArrowUp": e.preventDefault(); if (idx > 0) selectClip(list[idx - 1]); break;
-      case "ArrowDown": e.preventDefault(); if (idx >= 0 && idx < list.length - 1) selectClip(list[idx + 1]); break;
+      case "ArrowUp": e.preventDefault(); if (idx > 0) selectClip(list[idx - 1]); focusActiveClip(); break;
+      case "ArrowDown": e.preventDefault(); if (idx >= 0 && idx < list.length - 1) selectClip(list[idx + 1]); focusActiveClip(); break;
       case "KeyM": video.muted = !video.muted; renderVolume(); break;
       case "KeyF": setFullView(!isFullView()); break;
       case "KeyE": editShot(); break;
