@@ -172,6 +172,27 @@ fn emit_state(app: &AppHandle) {
     let _ = app.emit("state", d);
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StatusDto {
+    status: Option<LiveStatus>,
+    disk_free: Option<u64>,
+}
+
+/// Тик буфера (раз в 2 с, пока идёт запись): маленькое событие и только видимым окнам.
+/// Полное состояние с настройками уходит лишь при настоящих изменениях (`emit_state`),
+/// иначе три WebView разбирали его каждые 2 с, а открытые настройки сбрасывались.
+fn emit_status(app: &AppHandle) {
+    let d = dto(&lock(app));
+    update_tray(app, &d);
+    let s = StatusDto { status: d.status, disk_free: d.disk_free };
+    for label in ["main", "overlay"] {
+        if app.get_webview_window(label).is_some_and(|w| w.is_visible().unwrap_or(false)) {
+            let _ = app.emit_to(label, "status", &s);
+        }
+    }
+}
+
 fn clips_changed(app: &AppHandle) {
     let _ = app.emit("clips-changed", ());
 }
@@ -330,7 +351,7 @@ fn forward_events(app: AppHandle, events: mpsc::Receiver<Event>, generation: u64
         match ev {
             Event::Status { buffered_secs, buffer_bytes, fps, dropped } => {
                 lock(&app).status = Some(LiveStatus { buffered_secs, buffer_bytes, fps, dropped });
-                emit_state(&app);
+                emit_status(&app);
                 storage::on_status(&app);
             }
             Event::Saved { path, seconds, bytes } => {
@@ -565,6 +586,8 @@ fn show_main(app: &AppHandle) {
         let _ = w.show();
         let _ = w.set_focus();
     }
+    // пока окно было спрятано, тики буфера ему не шли
+    emit_state(app);
 }
 
 /// Спрятать оверлей: сначала интерфейс плавно гаснет, потом окно скрывается.
@@ -776,21 +799,28 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 }
 
 fn update_tray(app: &AppHandle, d: &StateDto) {
+    // меню и подсказку трея трогаем только когда они меняются
+    static LAST: Mutex<Option<(bool, bool, String)>> = Mutex::new(None);
+    let Some(tray) = app.tray_by_id("main") else { return };
+    let tip = match (&d.status, d.recording) {
+        _ if d.record_started.is_some() => "Clipback — идёт запись".to_string(),
+        (Some(s), true) => format!("Clipback — в буфере {}", fmt_secs(s.buffered_secs)),
+        (_, true) => "Clipback — запись идёт".to_string(),
+        _ => "Clipback — запись выключена".to_string(),
+    };
+    let now = (d.recording || d.starting, d.record_started.is_some(), tip);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if last.as_ref() == Some(&now) {
+        return;
+    }
     if let Some(item) = st(app).rec_item.lock().ok().and_then(|g| g.clone()) {
-        let _ = item.set_checked(d.recording || d.starting);
+        let _ = item.set_checked(now.0);
     }
     if let Some(item) = st(app).record_item.lock().ok().and_then(|g| g.clone()) {
-        let _ = item.set_text(if d.record_started.is_some() { "Остановить запись" } else { "Начать запись" });
+        let _ = item.set_text(if now.1 { "Остановить запись" } else { "Начать запись" });
     }
-    if let Some(tray) = app.tray_by_id("main") {
-        let tip = match (&d.status, d.recording) {
-            _ if d.record_started.is_some() => "Clipback — идёт запись".to_string(),
-            (Some(s), true) => format!("Clipback — в буфере {}", fmt_secs(s.buffered_secs)),
-            (_, true) => "Clipback — запись идёт".to_string(),
-            _ => "Clipback — запись выключена".to_string(),
-        };
-        let _ = tray.set_tooltip(Some(tip));
-    }
+    let _ = tray.set_tooltip(Some(now.2.clone()));
+    *last = Some(now);
 }
 
 // ---------- горячие клавиши ----------

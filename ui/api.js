@@ -91,7 +91,7 @@
     if (!state.recording) return;
     const s = Math.min(settings.bufferMinutes * 60, (Date.now() - started) / 1000 + 200);
     state.status = { bufferedSecs: s, bufferBytes: s * 2.6e6, fps: 60, dropped: 0 };
-    emit("state", state);
+    emit("status", { status: state.status, diskFree: state.diskFree });
   }, 2000);
 
   const find = (path) => clips.find((c) => c.path === path);

@@ -228,7 +228,8 @@ function main() {
   $("#btn-record").onclick = () => call("toggle_record_cmd");
 
   // ---------- статус записи ----------
-  function renderState() {
+  // tick: тик буфера раз в 2 с — открытые настройки не перестраиваем (списки закрывались, поля теряли фокус)
+  function renderState(tick) {
     const st = S.state;
     if (!st) return;
     const s = st.settings;
@@ -311,7 +312,7 @@ function main() {
     } else {
       banner.hidden = true;
     }
-    if ($("#settings").classList.contains("open")) fillSettings();
+    if (!tick && $("#settings").classList.contains("open")) fillSettings();
   }
 
   function fmtMinutes(m) {
@@ -2309,6 +2310,12 @@ function main() {
 
   // ---------- события от ядра ----------
   api.on("state", (st) => { S.state = st; renderState(); });
+  api.on("status", (x) => {
+    if (!S.state) return;
+    S.state.status = x.status;
+    S.state.diskFree = x.diskFree;
+    renderState(true);
+  });
   api.on("clips-changed", () => loadClips());
   api.on("clip-saved", (path) => {
     if (MODE === "browser") toast("Повтор сохранён", "", "replay");
