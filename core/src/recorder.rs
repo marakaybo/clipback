@@ -322,8 +322,10 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
                     let path = crate::util::unique_path(&dir, &base, "mp4");
                     let frame_secs = 1.0 / fps as f64;
                     let ev = events.clone();
-                    // запись идёт в отдельном потоке — захват не прерывается
-                    std::thread::spawn(move || {
+                    // запись идёт в отдельном потоке — захват не прерывается; при остановке
+                    // (выход из программы) поток дожидаемся, иначе клип остался бы `.part`
+                    finishing.0.retain(|t| !t.is_finished());
+                    let t = std::thread::spawn(move || {
                         let packets = &snap.video;
                         let inputs: Vec<crate::mux::AudioInput> =
                             snap.audio.iter().map(|a| crate::mux::AudioInput { packets: a, silence: &silence }).collect();
@@ -349,6 +351,7 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
                             Err(e) => ev.send(Event::SaveFailed { message: format!("{e:#}") }),
                         };
                     });
+                    finishing.0.push(t);
                 }
             }
         }
