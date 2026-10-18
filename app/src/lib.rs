@@ -1070,6 +1070,17 @@ fn set_favorite(app: AppHandle, path: String, on: bool) -> Res<()> {
 
 /// Автоочистка: самые старые клипы — в корзину, пока папка не уложится в лимиты.
 fn auto_clean(app: &AppHandle) {
+    // запуски после сохранения, смены настроек и раз в 30 мин не должны идти одновременно:
+    // второй убирал бы те же файлы (ошибки, двойное уведомление)
+    static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if RUNNING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    auto_clean_once(app);
+    RUNNING.store(false, Ordering::SeqCst);
+}
+
+fn auto_clean_once(app: &AppHandle) {
     let s = lock(app).settings.clone();
     if !s.auto_clean || (s.clean_max_gb == 0 && s.clean_max_days == 0) {
         return;
