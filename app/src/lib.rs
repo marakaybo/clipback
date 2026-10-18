@@ -7,6 +7,7 @@ mod library;
 mod nvidia;
 mod settings;
 mod sound;
+mod storage;
 mod trash;
 mod update;
 mod widgets;
@@ -125,6 +126,10 @@ struct StateDto {
     record_started: Option<u64>,
     /// Свободно на диске с клипами (байты).
     disk_free: Option<u64>,
+    /// Папка с клипами недоступна — текст плашки (`storage.rs`).
+    folder_problem: Option<String>,
+    /// Оперативной памяти в компьютере (байты) — для оценки буфера в настройках.
+    mem_total: Option<u64>,
     settings: Settings,
     version: &'static str,
     portable: bool,
@@ -142,6 +147,8 @@ fn dto(i: &Inner) -> StateDto {
         hotkey_errors: i.hotkey_errors.clone(),
         record_started: i.record_started,
         disk_free: winutil::free_space(&i.settings.out_dir),
+        folder_problem: storage::problem_text(),
+        mem_total: storage::ram_total(),
         settings: i.settings.clone(),
         version: env!("CARGO_PKG_VERSION"),
         portable: update::is_portable(),
@@ -322,6 +329,7 @@ fn forward_events(app: AppHandle, events: mpsc::Receiver<Event>, generation: u64
             Event::Status { buffered_secs, buffer_bytes, fps, dropped } => {
                 lock(&app).status = Some(LiveStatus { buffered_secs, buffer_bytes, fps, dropped });
                 emit_state(&app);
+                storage::on_status(&app);
             }
             Event::Saved { path, seconds, bytes } => {
                 log(format!("сохранён повтор {:.1} с, {} байт: {}", seconds, bytes, path.display()));
@@ -358,10 +366,12 @@ fn forward_events(app: AppHandle, events: mpsc::Receiver<Event>, generation: u64
                 let _ = app.emit("clip-saved", path.to_string_lossy().to_string());
                 cue(&app, sound::Cue::RecordStop);
                 auto_clean_later(&app);
-                show_toast(&app, "Запись сохранена", &format!("{} · {}", fmt_secs(seconds), name), "rec");
+                let title = if storage::take_low_stop() { "Мало места — запись сохранена" } else { "Запись сохранена" };
+                show_toast(&app, title, &format!("{} · {}", fmt_secs(seconds), name), "rec");
             }
             Event::RecordFailed { message } => {
                 log(format!("запись не удалась: {message}"));
+                storage::take_low_stop();
                 lock(&app).record_started = None;
                 show_indicator(&app, false);
                 emit_state(&app);
@@ -466,6 +476,12 @@ fn now_ms() -> u64 {
 /// Начать или остановить полноценную запись. Если захват выключен — включить его и начать.
 fn toggle_record(app: &AppHandle) {
     let label = current_game_label(app);
+    if lock(app).record_started.is_none() {
+        if let Some(r) = storage::record_blocked(app) {
+            show_toast(app, &r, "Запись не начата", "error");
+            return;
+        }
+    }
     let mut i = lock(app);
     if let Some(r) = &i.recorder {
         let dir = Some(util::clip_dir(&i.settings.out_dir, label.as_deref(), i.settings.game_folders));
@@ -495,6 +511,12 @@ fn current_game_label(app: &AppHandle) -> Option<String> {
 
 fn save_replay(app: &AppHandle) {
     let label = current_game_label(app);
+    if lock(app).recorder.is_some() {
+        if let Some(r) = storage::save_blocked(app, storage::replay_expected(app)) {
+            show_toast(app, &r, "Клип не сохранён — повтор пока в памяти", "error");
+            return;
+        }
+    }
     let i = lock(app);
     match &i.recorder {
         Some(r) => {
@@ -511,6 +533,7 @@ fn save_replay(app: &AppHandle) {
 fn take_screenshot(app: &AppHandle) -> Result<clips::ClipEntry, String> {
     let game = current_game_label(app);
     let label = game.clone().unwrap_or_else(|| "Скриншот".into());
+    storage::ensure_space(app, storage::shot_expected(app), "скриншот не сохранён")?;
     let (tx, rx) = mpsc::channel();
     let (dir, jpeg) = {
         let i = lock(app);
@@ -866,6 +889,7 @@ async fn screenshot(app: AppHandle) -> Res<clips::ClipEntry> {
 
 #[tauri::command]
 async fn list_clips(app: AppHandle) -> Vec<clips::ClipEntry> {
+    storage::recheck(&app);
     let dir = out_dir(&app);
     let mut l = clips::list(&dir);
     favs(&app).mark(&mut l);
@@ -1003,6 +1027,7 @@ async fn trim_clip(
 ) -> Res<clips::TrimOut> {
     let p = checked_path(&app, &path)?;
     let q = quality.filter(|q| q != "original");
+    storage::ensure_space(&app, storage::trim_expected_for(&p, start, end, q.as_deref()), "отрезок не сохранён")?;
     let progress_app = app.clone();
     let mut last = 0.0;
     let mut progress = move |f: f64| {
@@ -1197,6 +1222,7 @@ async fn copy_clip(app: AppHandle, path: String) -> Res<()> {
 async fn save_frame(app: AppHandle, png_base64: String, label: Option<String>, from: Option<String>) -> Res<clips::ClipEntry> {
     let data = base64::engine::general_purpose::STANDARD.decode(png_base64.as_bytes()).map_err(err)?;
     let label = label.and_then(|l| clips::clean_name(&l).ok()).unwrap_or_else(|| "Кадр".into());
+    storage::ensure_space(&app, data.len() as u64, "кадр не сохранён")?;
     // кадр — рядом с клипом, из которого он взят (в той же папке игры)
     let src = from.and_then(|f| checked_path(&app, &f).ok());
     let dir = src.as_deref().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_else(|| out_dir(&app));
@@ -1212,6 +1238,7 @@ async fn save_frame(app: AppHandle, png_base64: String, label: Option<String>, f
 async fn save_edited_image(app: AppHandle, path: String, png_base64: String, replace: bool) -> Res<clips::ClipEntry> {
     let p = checked_path(&app, &path)?;
     let data = base64::engine::general_purpose::STANDARD.decode(png_base64.as_bytes()).map_err(err)?;
+    storage::ensure_space(&app, data.len() as u64, "скриншот не сохранён")?;
     let mut e = clips::save_edited(&p, &data, replace).map_err(|e| format!("{e:#}"))?;
     inherit_hidden(&app, &p, &mut e);
     log(format!("скриншот отредактирован: {}", e.path));
@@ -1234,6 +1261,7 @@ fn set_settings(app: AppHandle, settings: Settings) -> Res<Settings> {
     if old.out_dir != new.out_dir {
         let _ = std::fs::create_dir_all(&new.out_dir);
         let _ = app.asset_protocol_scope().allow_directory(&new.out_dir, true);
+        storage::recheck(&app);
         clips_changed(&app);
     }
     if (&old.hotkey_overlay, &old.hotkey_save, &old.hotkey_screenshot, &old.hotkey_record)
@@ -1489,6 +1517,7 @@ pub fn run() {
             create_windows(&handle, start_hidden)?;
             sync_autostart(&handle);
             watch_mic(handle.clone());
+            storage::watch(handle.clone());
             winutil::install_drag_cursors();
             build_tray(&handle)?;
             register_hotkeys(&handle);
