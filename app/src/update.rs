@@ -189,16 +189,47 @@ fn replace_elevated(bytes: &[u8]) -> Result<(), String> {
     use windows::core::{HSTRING, PCWSTR};
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
+    use std::io::{Read, Write};
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
     let target = std::env::current_exe().map_err(|e| e.to_string())?;
-    let tmp = std::env::temp_dir().join("clipback-update.exe");
-    std::fs::write(&tmp, bytes).map_err(|e| format!("не удалось сохранить обновление: {e}"))?;
+    // своя новая папка и файл, которого ещё не было: заранее подложить подмену нельзя
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let dir = std::env::temp_dir().join(format!("clipback-update-{}-{stamp}", std::process::id()));
+    std::fs::create_dir(&dir).map_err(|e| format!("не удалось сохранить обновление: {e}"))?;
+    let tmp = dir.join("clipback-update.exe");
+    let saved = (|| -> std::io::Result<std::fs::File> {
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        f.write_all(bytes)?;
+        drop(f);
+        // держим файл открытым только на чтение и без права записи для других — до выхода
+        // программы его никто не заменит; содержимое сверяем уже через этот дескриптор
+        let mut f = std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ.0).open(&tmp)?;
+        let mut check = Vec::with_capacity(bytes.len());
+        f.read_to_end(&mut check)?;
+        if check != bytes {
+            return Err(std::io::Error::other("файл обновления изменён"));
+        }
+        Ok(f)
+    })();
+    let guard = match saved {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(format!("не удалось сохранить обновление: {e}"));
+        }
+    };
     let params = format!("--install-over \"{}\" {}", target.display(), std::process::id());
     let r = unsafe {
         ShellExecuteW(None, &HSTRING::from("runas"), &HSTRING::from(tmp.as_os_str()), &HSTRING::from(params), PCWSTR::null(), SW_HIDE)
     };
     if r.0 as isize <= 32 {
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&dir);
         return Err("обновление отменено: Windows не дала прав на папку с программой. Перенесите Clipback, например, в Документы, или скачайте новую версию с GitHub".into());
     }
+    // дескриптор закроется сам при выходе программы
+    std::mem::forget(guard);
     Ok(())
 }
 
