@@ -8,13 +8,15 @@ use clipback_core::{sysload, volume};
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 
 pub struct Widgets {
     keeper: volume::VolumeKeeper,
     /// Последний замер нагрузки и история — их пишет фоновый поток (`sample_load`).
     load: Arc<Mutex<LoadState>>,
+    /// Поток замера: будим его, когда оверлей начинает спрашивать нагрузку.
+    sampler: Option<std::thread::Thread>,
 }
 
 /// Сколько секунд истории нагрузки хранить (график в оверлее).
@@ -22,6 +24,8 @@ const HISTORY: usize = 120;
 
 #[derive(Default)]
 struct LoadState {
+    /// Когда оверлей последний раз спрашивал нагрузку.
+    asked: Option<Instant>,
     last: Option<LoadDto>,
     cpu: VecDeque<f32>,
     gpu: VecDeque<f32>,
@@ -34,12 +38,13 @@ pub fn init(app: &AppHandle) {
     keeper.set_locks(lock_list(&lock(app).settings.volume_locks));
     let load = Arc::new(Mutex::new(LoadState::default()));
     let l = load.clone();
-    let _ = std::thread::Builder::new().name("clipback-load".into()).spawn(move || sample_load(l));
-    app.manage(Widgets { keeper, load });
+    let sampler = std::thread::Builder::new().name("clipback-load".into()).spawn(move || sample_load(l)).ok().map(|h| h.thread().clone());
+    app.manage(Widgets { keeper, load, sampler });
 }
 
-/// Нагрузка — раз в секунду всё время: при открытии оверлея цифры и график уже готовы.
-/// Это несколько счётчиков Windows (те же, что у диспетчера задач) — на игру не влияет.
+/// Нагрузка — раз в секунду, пока открыт оверлей, иначе раз в 10 с (без температуры
+/// видеокарты): счётчик `GPU Engine(*)` перебирает сотни записей, а смотрят на цифры
+/// только в оверлее. График при открытии уже есть — редкий замер повторяется в истории.
 fn sample_load(state: Arc<Mutex<LoadState>>) {
     let mut sampler = match sysload::Sampler::new() {
         Ok(s) => s,
@@ -48,17 +53,31 @@ fn sample_load(state: Arc<Mutex<LoadState>>) {
             return;
         }
     };
+    let watched = |s: &Arc<Mutex<LoadState>>| s.lock().ok().and_then(|g| g.asked).is_some_and(|t| t.elapsed() < Duration::from_secs(3));
+    let mut last = Instant::now();
     loop {
         // проценты считаются между двумя замерами — первый замер только запоминает отсчёт
-        std::thread::sleep(Duration::from_secs(1));
+        if watched(&state) {
+            std::thread::sleep(Duration::from_secs(1));
+        } else {
+            // оверлей открыли — `system_load` будит поток
+            std::thread::park_timeout(Duration::from_secs(10));
+        }
+        let open = watched(&state);
         let load = sampler.sample();
-        let dto = LoadDto { load, gpu_temp: crate::nvidia::gpu_temperature(), cpu_history: Vec::new(), gpu_history: Vec::new() };
+        let gpu_temp = if open { crate::nvidia::gpu_temperature() } else { None };
+        let dto = LoadDto { load, gpu_temp, cpu_history: Vec::new(), gpu_history: Vec::new() };
+        // по точке на секунду: редкий замер повторяем столько раз, сколько секунд прошло
+        let secs = (last.elapsed().as_secs_f32().round() as usize).clamp(1, 10);
+        last = Instant::now();
         let Ok(mut guard) = state.lock() else { return };
         let s = &mut *guard;
         for (h, v) in [(&mut s.cpu, dto.load.cpu), (&mut s.gpu, dto.load.gpu)] {
             if let Some(v) = v {
-                h.push_back(v);
-                if h.len() > HISTORY {
+                for _ in 0..secs {
+                    h.push_back(v);
+                }
+                while h.len() > HISTORY {
                     h.pop_front();
                 }
             }
@@ -201,7 +220,14 @@ pub struct LoadDto {
 #[tauri::command]
 pub async fn system_load(app: AppHandle) -> Res<LoadDto> {
     let w = widgets(&app);
-    let s = w.load.lock().map_err(err)?;
+    let mut s = w.load.lock().map_err(err)?;
+    let idle = s.asked.is_none_or(|t| t.elapsed() >= Duration::from_secs(3));
+    s.asked = Some(Instant::now());
+    if idle {
+        if let Some(t) = &w.sampler {
+            t.unpark();
+        }
+    }
     let mut dto = s.last.clone().ok_or("нагрузка ещё считается")?;
     dto.cpu_history = s.cpu.iter().copied().collect();
     dto.gpu_history = s.gpu.iter().copied().collect();
