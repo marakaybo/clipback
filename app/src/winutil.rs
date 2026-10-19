@@ -316,3 +316,13 @@ pub fn hide(hwnd: isize) {
         let _ = ShowWindow(HWND(hwnd as _), SW_HIDE);
     }
 }
+
+/// Скрыть окно с экрана, оставив его «показанным» для WebView2 (DWM cloak):
+/// страница успевает нарисоваться, и долго спрятанное окно не мелькает белым.
+pub fn cloak(hwnd: isize, on: bool) {
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CLOAK};
+    let v = windows::core::BOOL::from(on);
+    unsafe {
+        let _ = DwmSetWindowAttribute(HWND(hwnd as _), DWMWA_CLOAK, &v as *const _ as _, std::mem::size_of_val(&v) as u32);
+    }
+}
