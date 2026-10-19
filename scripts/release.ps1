@@ -55,7 +55,7 @@ $nsisDir = Join-Path $app "target\release\bundle\nsis"
 $setupSrc = Join-Path $nsisDir "Clipback_${version}_x64-setup.exe"
 if (-not (Test-Path $setupSrc)) { throw "не найден установщик $setupSrc" }
 # версия внутри exe (Свойства -> Подробно) должна совпадать с выпускаемой
-$exeVer = (Get-Item (Join-Path $app "targetelease\clipback.exe")).VersionInfo.FileVersion
+$exeVer = (Get-Item (Join-Path $app "target\release\clipback.exe")).VersionInfo.FileVersion
 if ($exeVer -ne $version) { throw "в exe версия $exeVer, а выпускается $version — пересоберите (cargo clean -p clipback)" }
 
 if (Test-Path $dist) { Remove-Item $dist -Recurse -Force }
