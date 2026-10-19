@@ -171,6 +171,10 @@ fn to_dos_path(nt: &str, drives: &[(String, String)]) -> String {
             }
         }
     }
+    // сетевая папка
+    if let Some(rest) = nt.strip_prefix(r"\Device\Mup\") {
+        return format!(r"\\{rest}");
+    }
     nt.to_string()
 }
 
@@ -239,6 +243,14 @@ mod tests {
     }
 
     #[test]
+    fn nt_paths_to_dos() {
+        let d = vec![(r"\Device\HarddiskVolume3".to_string(), "C:".to_string())];
+        assert_eq!(to_dos_path(r"\Device\HarddiskVolume3\Games\bf6.exe", &d), r"C:\Games\bf6.exe");
+        assert_eq!(to_dos_path(r"\Device\HarddiskVolume31\x.exe", &d), r"\Device\HarddiskVolume31\x.exe");
+        assert_eq!(to_dos_path(r"\Device\Mup\nas\share\a.exe", &d), r"\\nas\share\a.exe");
+    }
+
+    #[test]
     fn snapshot_sees_this_process_without_opening_it() {
         let s = snapshot();
         let me = std::process::id();
@@ -247,5 +259,9 @@ mod tests {
         assert!(s.contains_key(&p.parent) || p.parent != 0);
         let path = image_path(me).expect("путь к своему exe");
         assert!(path.len() > 3 && path.as_bytes()[1] == b':', "{path}");
+        // тот же путь, что раньше давал QueryFullProcessImageNameW (и current_exe)
+        let exe = std::env::current_exe().unwrap().to_string_lossy().to_string();
+        assert!(path.eq_ignore_ascii_case(exe.trim_start_matches(r"\\?\")), "{path} != {exe}");
+        assert_eq!(crate::util::exe_name(me).as_deref(), path.rsplit('\\').next());
     }
 }
