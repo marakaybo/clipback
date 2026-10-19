@@ -39,6 +39,7 @@ jobs:
         run: |
           node ui/tests/names.test.js ui/app.js
           node ui/tests/notes.test.js
+          node ui/tests/montage.test.js
 
       # подсказки, на результат не влияют
       - name: Clippy core

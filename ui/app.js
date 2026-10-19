@@ -62,19 +62,23 @@ function hhmm(ms) {
 
 /// «Battlefield 6 2026-10-15 21-48-03» -> { game: "Battlefield 6", when: ms }
 function parseName(name) {
-  // после даты могут идти приписки: « (2)», « (отрезок)», « (отрезок) (2)»
+  // после даты могут идти приписки: « (2)», « (отрезок)», « (монтаж)», « (отрезок) (2)»
   const m = /^(.*?) ?(\d{4})-(\d{2})-(\d{2}) (\d{2})-(\d{2})-(\d{2})((?: \([^)]*\)| правка)*)$/.exec(name);
-  if (!m) return { game: null, when: null, cut: /\(отрезок\)/.test(name) };
+  if (!m) return { game: null, when: null, cut: cutKind(name) };
   const when = new Date(+m[2], +m[3] - 1, +m[4], +m[5], +m[6], +m[7]).getTime();
   const generic = ["Clipback", "Запись", "Скриншот", "Кадр"];
-  return { game: m[1] && !generic.includes(m[1]) ? m[1] : null, when, cut: /\(отрезок\)/.test(m[8]) };
+  return { game: m[1] && !generic.includes(m[1]) ? m[1] : null, when, cut: cutKind(m[8]) };
+}
+
+function cutKind(s) {
+  return /\(монтаж\)/.test(s) ? "монтаж" : /\(отрезок\)/.test(s) ? "отрезок" : null;
 }
 
 function clipTitle(c) {
   const p = parseName(c.name);
   if (p.when === null) return c.name;
   const base = p.game || (c.kind === "shot" ? "Скриншот" : /^Запись /.test(c.name) ? "Запись" : "Повтор");
-  return p.cut ? `${base} — отрезок` : base;
+  return p.cut ? `${base} — ${p.cut}` : base;
 }
 
 const ICONS = {
@@ -558,7 +562,7 @@ function main() {
       if (c.kind === "shot") th.insertAdjacentHTML("beforeend", `<span class="kind-shot" title="Скриншот">${svg("camera")}</span>`);
       else if (c.broken) th.insertAdjacentHTML("beforeend", `<span class="dur warn">ошибка</span>`);
       else th.insertAdjacentHTML("beforeend", `<span class="dur"><i class="play"></i>${fmt(c.duration, 0)}</span>`);
-      if (/\(отрезок\)/.test(c.name)) th.insertAdjacentHTML("beforeend", `<span class="badge" title="Отрезок">${svg("scissors")}</span>`);
+      if (/\((отрезок|монтаж)\)/.test(c.name)) th.insertAdjacentHTML("beforeend", `<span class="badge" title="Отрезок">${svg("scissors")}</span>`);
       if (c.hidden) th.insertAdjacentHTML("beforeend", `<span class="veiled-mark" title="Скрытая запись"><svg viewBox="0 0 24 24"><path d="M3 3l18 18"/><path d="M10.6 5.1A10 10 0 0 1 12 5c5 0 9 4.5 10 7a14 14 0 0 1-3.2 4.2M6.6 6.6A14 14 0 0 0 2 12c1 2.5 5 7 10 7a9.6 9.6 0 0 0 4.4-1.1"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg></span>`);
       const info = document.createElement("div");
       info.className = "clip-info";
@@ -896,6 +900,7 @@ function main() {
     if (!same) {
       S.trackOn = {};
       S.trackVol = {};
+      mt.reset();
     }
     renderQuality();
     // клип открывается с начала или с последних 30 секунд — как выбрано в настройках
@@ -955,6 +960,7 @@ function main() {
     }
     if (p && S.t >= S.outT - 0.05 && S.t <= S.outT + 0.05) seek(S.inT);
     if (p && S.t >= (c ? c.duration : 0) - 0.05) seek(S.inT);
+    if (p && mt.active() && !mt.beforePlay()) p = false;
     S.playing = p;
     if (p) kickFrames();
     // на паузе во весь экран панель с перемоткой сразу видна
@@ -1168,6 +1174,7 @@ function main() {
     tl.style.setProperty("--sel-l", `${xi}px`);
     tl.style.setProperty("--sel-r", `${Math.max(0, w - xo)}px`);
     $("#playhead").style.left = `${tToX(S.t)}px`;
+    mt.render();
   }
 
   function drag(onMove, cursor) {
@@ -1202,6 +1209,12 @@ function main() {
   $("#btn-out").onclick = setOut;
   $("#btn-last30").onclick = () => { if (!S.clip) return; S.outT = S.clip.duration; S.inT = Math.max(0, S.outT - 30); seek(S.inT); };
   $("#btn-reset").onclick = () => { if (!S.clip) return; S.inT = 0; S.outT = S.clip.duration; updateAll(); };
+
+  // монтаж: несколько кусков одним файлом (ui/montage.js)
+  const mt = window.Montage.create({
+    S, $, tl, tToX, xToT, seek, setPlaying, updateAll, updateExport, showProgress, toast, fmt, mb, api, loadClips, audioKeep, audioGains,
+    quality: () => (S.exportQuality === "discord" ? `discord:${S.discordMb}` : S.exportQuality),
+  });
 
   // ---------- звуковые дорожки ----------
   // Названия дорожек хранятся в файле. «Всё вместе» (система + микрофон) — для плееров и Discord,
@@ -1476,12 +1489,12 @@ function main() {
   function updateExport() {
     const c = S.clip;
     if (!c || c.kind !== "video") return;
-    const len = S.outT - S.inT;
+    const len = mt.active() ? mt.total() : S.outT - S.inT;
     $("#est-len").textContent = fmt(len, 1);
     $("#est-size").textContent = c.duration > 0 ? mb(estimateSize(c, len)) : "—";
-    const whole = S.inT <= 0.01 && S.outT >= c.duration - 0.01 && audioKeep(c) === null && audioGains(c) === null && S.exportQuality === "original";
+    const whole = !mt.active() && S.inT <= 0.01 && S.outT >= c.duration - 0.01 && audioKeep(c) === null && audioGains(c) === null && S.exportQuality === "original";
     const tooLong = S.exportQuality === "discord" && !sizeFit(len, S.discordMb, exportTracks(c)).ok;
-    $("#btn-export").disabled = S.busy || whole || tooLong;
+    $("#btn-export").disabled = S.busy || whole || tooLong || (mt.active() && len < 0.1);
     if (S.exportQuality === "discord") renderQuality(); // подсказка зависит от длины отрезка
     // подсказка у неактивной кнопки не всплывает — причину пишем рядом
     $("#export-why").hidden = !whole || S.busy;
@@ -1498,6 +1511,7 @@ function main() {
   async function exportClip() {
     const c = S.clip;
     if (!c || c.kind !== "video" || S.busy || $("#btn-export").disabled) return;
+    if (mt.active()) return mt.save();
     const len = S.outT - S.inT;
     const replace = S.saveMode === "replace";
     if (replace && !(await confirmBox("Оставить только отрезок?", `В файле останется ${fmt(len, 1)}, остальное видео удалится.`, "Заменить"))) return;
@@ -1766,7 +1780,8 @@ function main() {
     if (c && c.kind === "video" && S.playing) {
       if (c.demo) S.t += dt * S.speed;
       else S.t = video.currentTime;
-      if (S.loopSel && S.t >= S.outT) seek(S.inT);
+      if (mt.active()) mt.tick();
+      else if (S.loopSel && S.t >= S.outT) seek(S.inT);
       else if (S.t >= c.duration) { S.t = c.duration; setPlaying(false); }
       updateAll();
     }
@@ -2286,6 +2301,7 @@ function main() {
       if (e.key === "Escape") closeConfirm(false);
       return;
     }
+    if (mt.key(e)) return;
     if (e.key === "Escape") {
       if ($("#settings").classList.contains("open")) return closeSettings();
       if (S.picked.size) return pickClear();

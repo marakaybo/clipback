@@ -1,0 +1,29 @@
+/* ---------- Монтаж на таймлайне (ui/montage.js) ---------- */
+/* в монтаже вместо одного отрезка — куски, рамка отрезка не нужна */
+.tl.mt-on .sel, .tl.mt-on .dim { display: none; }
+.tl.mt-selecting { cursor: default; }
+
+.mt-layer { position: absolute; left: 0; right: 0; top: 18px; bottom: 0; pointer-events: none; }
+/* убранное — затемнено и заштриховано: в сохранение не попадёт */
+.mt-gap {
+  position: absolute; top: 0; bottom: 0;
+  background: repeating-linear-gradient(135deg, rgba(10,11,12,.78) 0 5px, rgba(10,11,12,.6) 5px 10px);
+}
+.mt-piece { position: absolute; top: 0; height: 40px; border-top: 2px solid var(--accent); border-bottom: 2px solid var(--accent); }
+.mt-piece.sel { height: auto; bottom: 0; border: 2px solid var(--accent-text); border-radius: var(--r-sm); background: var(--accent-wash-2); }
+.mt-cut { position: absolute; top: -3px; height: 46px; width: 2px; margin-left: -1px; background: var(--accent-text); border-radius: 1px; }
+
+.mt-hint { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 8px 12px 0; font-size: var(--fs-xs); color: var(--text-3); }
+.mt-hint kbd { font: 600 var(--fs-xs) var(--mono); padding: 0 5px; border-radius: var(--r-sm); background: var(--s3); color: var(--text-2); }
+.mt-hint.selecting span:nth-child(4) kbd { background: var(--accent-wash-2); color: var(--accent-text); }
+
+/* сохранение монтажа — всегда копией рядом с оригиналом */
+.montage-on .field:has(#save-mode) { display: none; }
+.export > .mt-cancel { margin-bottom: 6px; }
+
+/* назначение клавиш в настройках */
+.mt-key { min-width: 160px; height: 30px; padding: 0 12px; border-radius: var(--r); background: var(--s1); border: 1px solid var(--line); font-family: var(--mono); font-size: var(--fs-sm); flex: none; }
+.mt-key:hover { border-color: rgba(255,255,255,.16); }
+.mt-key.listening { border-color: var(--accent); color: var(--accent-text); }
+#montage-keys-reset { background: none; border: none; padding: 0; color: var(--accent-text); font: inherit; cursor: pointer; }
+#montage-keys-reset:hover { text-decoration: underline; }

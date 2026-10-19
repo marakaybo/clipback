@@ -16,9 +16,9 @@ use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 
 /// Media Foundation в текущем потоке (счётчик внутри MF, лишний вызов безопасен).
-struct MfScope;
+pub(crate) struct MfScope;
 impl MfScope {
-    fn new() -> Result<Self> {
+    pub(crate) fn new() -> Result<Self> {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
             MFStartup(MF_VERSION, MFSTARTUP_FULL)?;
@@ -34,14 +34,14 @@ impl Drop for MfScope {
     }
 }
 
-fn wide(p: &Path) -> Vec<u16> {
+pub(crate) fn wide(p: &Path) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
     p.as_os_str().encode_wide().chain([0]).collect()
 }
 
-const ALL_STREAMS: u32 = MF_SOURCE_READER_ALL_STREAMS.0 as u32;
-const FIRST_VIDEO: u32 = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
-const EOS: u32 = MF_SOURCE_READERF_ENDOFSTREAM.0 as u32;
+pub(crate) const ALL_STREAMS: u32 = MF_SOURCE_READER_ALL_STREAMS.0 as u32;
+pub(crate) const FIRST_VIDEO: u32 = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
+pub(crate) const EOS: u32 = MF_SOURCE_READERF_ENDOFSTREAM.0 as u32;
 
 /// Насколько звук на выходе декодера отстаёт от позиции первого поданного кадра (отсчёты 48 кГц).
 /// Проверяется тестом `aac_round_trip_delay` вместе с кодировщиком Clipback.
@@ -237,7 +237,7 @@ pub fn audio_segment(
 }
 
 /// Раскодировать дорожку: позиция первого отсчёта и звук подряд (стерео −1…1).
-fn decode_track(packets: &[Arc<AudioPacket>]) -> Result<(i64, Vec<f32>)> {
+pub(crate) fn decode_track(packets: &[Arc<AudioPacket>]) -> Result<(i64, Vec<f32>)> {
     let first = packets.first().map_or(0, |p| p.pos);
     let mut dec = unsafe { AacDecoder::new()? };
     let mut out = Vec::with_capacity(packets.len() * crate::aac::FRAME as usize * 2);
@@ -332,7 +332,7 @@ impl Quality {
 }
 
 /// Устройство D3D11 на основной видеокарте (для декодера и кодировщика).
-fn device() -> Result<(ID3D11Device, ID3D11DeviceContext)> {
+pub(crate) fn device() -> Result<(ID3D11Device, ID3D11DeviceContext)> {
     let mut d = None;
     let mut c = None;
     unsafe {

@@ -20,6 +20,7 @@ pub mod media;
 pub mod mux;
 pub mod recorder;
 pub mod mixer;
+pub mod montage;
 pub mod ring;
 pub mod shot;
 pub mod sysload;

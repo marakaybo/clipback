@@ -6,6 +6,7 @@
   <title>Clipback</title>
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="widgets.css">
+  <link rel="stylesheet" href="montage.css">
   <script>
     // режим задаёт приложение: window | overlay | toast; в обычном браузере — демо
     document.documentElement.dataset.mode = window.__CLIPBACK_MODE__ || "browser";
@@ -480,6 +481,9 @@
             <dt>Выбрать несколько клипов</dt><dd>Ctrl / Shift + щелчок, Ctrl + A</dd>
             <dt>Закрыть оверлей</dt><dd>Esc</dd>
           </dl>
+          <h3>Монтаж</h3>
+          <div id="montage-keys"></div>
+          <p class="muted small-note">Работают, только когда открыт плеер. Отменить — Ctrl + Z, вернуть — Ctrl + Y. <button class="link-btn" id="montage-keys-reset">Вернуть как было</button></p>
         </section>
 
         <section class="tab" data-tab="storage">
@@ -592,6 +596,7 @@
 
   <script src="api.js"></script>
   <textarea class="ed-text" id="ed-text" rows="1" spellcheck="false" hidden></textarea>
+  <script src="montage.js"></script>
   <script src="app.js"></script>
   <script src="editor.js"></script>
   <script src="widgets.js"></script>
