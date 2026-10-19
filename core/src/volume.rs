@@ -3,7 +3,9 @@
 //! Громкость приложения в Windows — это громкость его аудиосессий (`ISimpleAudioVolume`)
 //! на устройстве вывода. У одного приложения их бывает несколько (Discord, браузер), поэтому
 //! приложение здесь — все сессии одного exe; ключ — имя exe маленькими буквами
-//! («discord.exe»), у системных звуков — `@system`.
+//! («discord.exe»), у системных звуков — `@system`. Звук помощника WebView2/CEF
+//! (`msedgewebview2.exe`) относится к приложению, которое его запустило (`proctree.rs`):
+//! у WhatsApp одна строка «WhatsApp», и замок держит все её сессии.
 //!
 //! Замок: `VolumeKeeper` держит громкость выбранных приложений. Windows сообщает о каждой
 //! смене громкости сессии (`IAudioSessionEvents::OnSimpleVolumeChanged`) и о каждой новой
@@ -139,7 +141,8 @@ pub fn set_mic_mute(muted: bool) -> Result<()> {
 
 struct Session {
     key: String,
-    pid: u32,
+    /// Процесс-владелец звука (у WebView2 — само приложение, а не его помощник).
+    owner: u32,
     ctrl: IAudioSessionControl2,
     vol: ISimpleAudioVolume,
     active: bool,
@@ -151,19 +154,45 @@ unsafe fn default_output() -> Result<IMMDevice> {
     en.GetDefaultAudioEndpoint(eRender, eConsole).context("нет устройства вывода звука")
 }
 
-/// Ключ приложения для сессии: имя exe маленькими буквами или `@system`.
-unsafe fn session_key(c2: &IAudioSessionControl2) -> Option<(String, u32)> {
-    if c2.IsSystemSoundsSession() == windows::Win32::Foundation::S_OK {
-        return Some((SYSTEM_KEY.into(), 0));
-    }
-    let pid = c2.GetProcessId().ok().filter(|p| *p != 0)?;
-    Some((crate::util::exe_name(pid)?.to_lowercase(), pid))
+/// Чьё приложение у процесса сессии.
+#[derive(Clone)]
+struct Owner {
+    pid: u32,
+    /// имя exe владельца маленькими буквами — ключ приложения
+    key: String,
 }
 
-/// Живые сессии устройства (кроме закрытых).
+/// pid процесса сессии -> владелец. Снимок процессов берётся, только когда появилась сессия
+/// с новым pid; pid закрытых сессий забываются.
+static OWNERS: Mutex<Option<HashMap<u32, Owner>>> = Mutex::new(None);
+/// ключ приложения -> путь к exe (для значка).
+static PATHS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+
+fn owners(pids: &[u32]) -> HashMap<u32, Owner> {
+    let Ok(mut guard) = OWNERS.lock() else { return HashMap::new() };
+    let cache = guard.get_or_insert_with(HashMap::new);
+    cache.retain(|pid, _| pids.contains(pid));
+    let missing: Vec<u32> = pids.iter().copied().filter(|p| !cache.contains_key(p)).collect();
+    if !missing.is_empty() {
+        let procs = crate::proctree::snapshot();
+        for pid in missing {
+            let o = crate::proctree::owner(&procs, pid);
+            let Some(p) = procs.get(&o) else { continue };
+            let path = crate::proctree::image_path(o);
+            let key = p.exe.to_lowercase();
+            if let (Some(path), Ok(mut m)) = (&path, PATHS.lock()) {
+                m.get_or_insert_with(HashMap::new).insert(key.clone(), path.clone());
+            }
+            cache.insert(pid, Owner { pid: o, key });
+        }
+    }
+    cache.clone()
+}
+
+/// Живые сессии устройства (кроме закрытых), у каждой — ключ приложения-владельца.
 unsafe fn sessions(mgr: &IAudioSessionManager2) -> Result<Vec<Session>> {
     let list = mgr.GetSessionEnumerator()?;
-    let mut out = Vec::new();
+    let mut raw = Vec::new();
     for i in 0..list.GetCount()? {
         let Ok(ctrl) = list.GetSession(i) else { continue };
         let state = ctrl.GetState().unwrap_or(AudioSessionStateExpired);
@@ -171,32 +200,66 @@ unsafe fn sessions(mgr: &IAudioSessionManager2) -> Result<Vec<Session>> {
             continue;
         }
         let Ok(c2) = ctrl.cast::<IAudioSessionControl2>() else { continue };
-        let Some((key, pid)) = session_key(&c2) else { continue };
         let Ok(vol) = ctrl.cast::<ISimpleAudioVolume>() else { continue };
-        out.push(Session { key, pid, ctrl: c2, vol, active: state == AudioSessionStateActive });
+        let system = c2.IsSystemSoundsSession() == windows::Win32::Foundation::S_OK;
+        let pid = if system { 0 } else { c2.GetProcessId().unwrap_or(0) };
+        if !system && pid == 0 {
+            continue;
+        }
+        raw.push((c2, vol, pid, state == AudioSessionStateActive));
+    }
+    let pids: Vec<u32> = raw.iter().map(|r| r.2).filter(|p| *p != 0).collect();
+    let owners = owners(&pids);
+    let mut out = Vec::new();
+    for (ctrl, vol, pid, active) in raw {
+        let (key, owner) = if pid == 0 {
+            (SYSTEM_KEY.to_string(), 0)
+        } else {
+            let Some(o) = owners.get(&pid) else { continue };
+            (o.key.clone(), o.pid)
+        };
+        out.push(Session { key, owner, ctrl, vol, active });
     }
     Ok(out)
+}
+
+/// Сессии устройства по умолчанию: (pid процесса сессии, pid владельца, ключ приложения).
+/// Для проверки и примера `mixer_owners`.
+pub fn session_owners() -> Result<Vec<(u32, u32, String)>> {
+    unsafe {
+        let mut out = Vec::new();
+        for s in sessions(&manager(&default_output()?)?)? {
+            out.push((s.ctrl.GetProcessId().unwrap_or(0), s.owner, s.key));
+        }
+        Ok(out)
+    }
+}
+
+/// PNG-значок приложения из строки микшера (по пути к его exe; процесс не открывается).
+pub fn app_icon(key: &str) -> Option<Vec<u8>> {
+    let path = PATHS.lock().ok()?.as_ref()?.get(&key.to_lowercase())?.clone();
+    crate::appicon::icon_png(&path)
 }
 
 unsafe fn manager(dev: &IMMDevice) -> Result<IAudioSessionManager2> {
     Ok(dev.Activate(CLSCTX_ALL, None)?)
 }
 
-/// Понятное имя программы: «Описание файла» из exe («Discord», «Google Chrome»),
+/// Понятное имя программы: имя приложения Store («WhatsApp») или «Описание файла» из exe
+/// («Discord», «Google Chrome»),
 /// иначе имя exe с большой буквы. Запоминается.
-fn friendly_name(pid: u32, key: &str) -> String {
+fn friendly_name(path: Option<String>, key: &str) -> String {
     static CACHE: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
     if key == SYSTEM_KEY {
         return "Системные звуки".into();
     }
-    let path = crate::util::exe_path(pid);
     let cache_key = path.clone().unwrap_or_else(|| key.to_string());
     if let Some(n) = CACHE.lock().ok().and_then(|c| c.as_ref().and_then(|m| m.get(&cache_key).cloned())) {
         return n;
     }
     let name = path
         .as_deref()
-        .and_then(file_description)
+        .and_then(|p| crate::appicon::package_name(p).or_else(|| file_description(p)))
         .filter(|d| !d.trim().is_empty() && d.chars().count() <= 40)
         .unwrap_or_else(|| {
             let exe = path.as_deref().and_then(|p| p.rsplit('\\').next()).unwrap_or(key);
@@ -249,7 +312,8 @@ pub fn mixer_state() -> Result<MixerState> {
         let me = std::process::id();
         let mut apps: Vec<AppVolume> = Vec::new();
         for s in sessions(&manager(&dev)?)? {
-            if s.pid == me {
+            // свой звук (и звук своего WebView2) не показываем
+            if s.owner == me {
                 continue;
             }
             let volume = s.vol.GetMasterVolume().unwrap_or(1.0);
@@ -263,7 +327,8 @@ pub fn mixer_state() -> Result<MixerState> {
                 a.active |= s.active;
                 continue;
             }
-            let name = friendly_name(s.pid, &s.key);
+            let path = PATHS.lock().ok().and_then(|m| m.as_ref().and_then(|m| m.get(&s.key).cloned()));
+            let name = friendly_name(path, &s.key);
             apps.push(AppVolume { key: s.key, name, volume, muted, active: s.active });
         }
         sort_apps(&mut apps);

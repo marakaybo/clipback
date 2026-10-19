@@ -103,6 +103,8 @@
       { key: "bf6.exe", name: "Battlefield™ 6", volume: 0.8, muted: false, active: true, locked: false },
       { key: "discord.exe", name: "Discord", volume: 0.35, muted: false, active: true, locked: true },
       { key: "spotify.exe", name: "Spotify", volume: 0.5, muted: true, active: false, locked: false },
+      { key: "whatsapp.root.exe", name: "WhatsApp", volume: 0.6, muted: false, active: true, locked: false },
+      { key: "flow.launcher.exe", name: "Flow Launcher", volume: 1, muted: false, active: false, locked: false },
       { key: "@system", name: "Системные звуки", volume: 1, muted: false, active: false, locked: false },
     ],
     outputs: [
@@ -116,6 +118,11 @@
     ],
   };
   const app = (key) => mixer.apps.find((a) => a.key === key);
+  // значки приложений (у Flow Launcher нет — общий значок)
+  const appIcon = (bg, letter) => "data:image/svg+xml," + encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="${bg}"/>` +
+    `<text x="16" y="22" font-family="Segoe UI,Arial" font-size="17" font-weight="700" fill="#fff" text-anchor="middle">${letter}</text></svg>`);
+  const icons = { "bf6.exe": appIcon("#1b2733", "6"), "discord.exe": appIcon("#5865f2", "D"), "spotify.exe": appIcon("#1db954", "S"), "whatsapp.root.exe": appIcon("#25d366", "W") };
   setInterval(() => {
     const d = app("discord.exe");
     if (!d.locked) d.volume = 1;
@@ -237,6 +244,7 @@
       return c;
     },
     mixer_state: () => JSON.parse(JSON.stringify(mixer)),
+    mixer_icon: ({ key }) => icons[key] || null,
     set_app_volume: ({ key, volume }) => { app(key).volume = volume; },
     set_app_mute: ({ key, muted }) => { app(key).muted = muted; },
     set_volume_lock: ({ key, volume, on }) => { Object.assign(app(key), { locked: on, volume }); },

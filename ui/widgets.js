@@ -21,6 +21,9 @@
     mute: '<svg viewBox="0 0 24 24"><path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M16 9l5 6M21 9l-5 6"/></svg>',
     lock: '<svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>',
     unlock: '<svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 7.5-2"/></svg>',
+    // значки строк без своего: системные звуки и программа без значка
+    system: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>',
+    app: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></svg>',
   };
 
   root.innerHTML = `
@@ -39,7 +42,24 @@
     </section>`;
 
   // ---------- микшер ----------
-  const mixer = { rows: new Map(), busyUntil: new Map(), master: null };
+  const mixer = { rows: new Map(), busyUntil: new Map(), master: null, icons: new Map() };
+
+  /// Значок приложения: спрашиваем один раз на приложение, пока оверлей жив.
+  function setIcon(box, key) {
+    if (key === "@system") {
+      box.innerHTML = ICON.system;
+      return;
+    }
+    box.innerHTML = ICON.app;
+    if (!mixer.icons.has(key)) mixer.icons.set(key, call("mixer_icon", { key }).catch(() => null));
+    mixer.icons.get(key).then((url) => {
+      if (!url) return;
+      const img = el("img");
+      img.alt = "";
+      img.src = url;
+      box.replaceChildren(img);
+    });
+  }
 
   /// Ползунок 0–100 с заливкой до значения; вызовы громкости — не чаще раза в 40 мс.
   function slider(onSet, onDone) {
@@ -85,7 +105,13 @@
     );
     r.addEventListener("input", () => { val.textContent = r.value; });
     body.append(top, r);
-    row.append(mute, body);
+    row.append(mute);
+    if (!master) {
+      const icon = el("span", "mx-icon");
+      setIcon(icon, key);
+      row.append(icon);
+    }
+    row.append(body);
     const o = { row, mute, name, val, r, data: null, lock: null };
     mute.onclick = () => {
       const muted = !o.data.muted;

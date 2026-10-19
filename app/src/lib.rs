@@ -1044,7 +1044,7 @@ fn toggle_record_cmd(app: AppHandle) {
 
 /// Долгая работа (диск, перекодирование, COM) — в отдельном потоке: иначе она занимает
 /// поток асинхронных команд, и опрос состояния и микшера ждёт, пока идёт экспорт.
-async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Res<T> + Send + 'static) -> Res<T> {
+pub(crate) async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Res<T> + Send + 'static) -> Res<T> {
     tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())?
 }
 
@@ -1877,6 +1877,7 @@ pub fn run() {
             update::install_update,
             update::take_whats_new,
             widgets::mixer_state,
+            widgets::mixer_icon,
             widgets::set_app_volume,
             widgets::set_app_mute,
             widgets::set_volume_lock,

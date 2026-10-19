@@ -6,6 +6,7 @@
 //!   -> Media Foundation H.264 (NVENC/AMF/QSV) -> кольцевой буфер в ОЗУ -> MP4
 
 pub mod aac;
+pub mod appicon;
 pub mod audio;
 mod audio_watch;
 pub mod capture;
@@ -20,6 +21,7 @@ pub mod media;
 pub mod mux;
 pub mod recorder;
 pub mod mixer;
+pub mod proctree;
 pub mod ring;
 pub mod shot;
 pub mod sysload;
