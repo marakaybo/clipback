@@ -26,6 +26,7 @@
   const now = Date.now();
   const H = 3600e3;
 
+  let montageCancel = false;
   let seq = 1;
   const mk = (name, ageMs, duration, hue, kind = "video", extra = {}) => ({
     path: `demo://${seq++}`,
@@ -229,6 +230,23 @@
       emit("clips-changed");
       return { clip: n, start: s, end };
     },
+    // монтаж: куски подряд одним файлом; «Отмена» обрывает сохранение
+    montage_clip: async ({ path, pieces }) => {
+      montageCancel = false;
+      for (let i = 1; i <= 20; i++) {
+        await new Promise((r) => setTimeout(r, 120));
+        if (montageCancel) throw "отменено";
+        emit("export-progress", i / 20);
+      }
+      const c = find(path);
+      if (!c) throw "файл не найден";
+      const dur = pieces.reduce((a, [s, e]) => a + (e - s), 0);
+      const n = mk(`${c.name} (монтаж)`, 0, dur, c.hue, "video", { seed: c.seed, markers: [], audioTracks: c.audioTracks, audioNames: c.audioNames });
+      clips.push(n);
+      emit("clips-changed");
+      return { clip: n, duration: dur, pieces: pieces.length };
+    },
+    cancel_montage: () => { montageCancel = true; },
     rename_clip: ({ path, name }) => {
       const c = find(path);
       if (clips.some((x) => x !== c && x.name === name)) throw "файл с таким именем уже есть";

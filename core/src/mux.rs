@@ -128,7 +128,7 @@ pub struct AudioInput<'a> {
 
 /// Кадры звуковой дорожки, выровненные по видео: (время в отсчётах от начала клипа, данные).
 /// Пропуски заполняются тишиной, наложения отбрасываются, длина подгоняется под видео.
-fn layout_audio(a: &AudioInput, t0_100ns: i64, end_samples: i64) -> Vec<(i64, Bytes)> {
+pub(crate) fn layout_audio(a: &AudioInput, t0_100ns: i64, end_samples: i64) -> Vec<(i64, Bytes)> {
     let frame = crate::aac::FRAME;
     let t0 = t0_100ns * crate::audio::RATE as i64 / 10_000_000;
     let silence = Bytes::copy_from_slice(a.silence);
@@ -328,13 +328,13 @@ pub struct ClipInfo {
     pub audio_names: Vec<String>,
 }
 
-fn open(path: &Path) -> Result<Mp4Reader<BufReader<File>>> {
+pub(crate) fn open(path: &Path) -> Result<Mp4Reader<BufReader<File>>> {
     let f = File::open(path).with_context(|| format!("не удалось открыть {}", path.display()))?;
     let size = f.metadata()?.len();
     Mp4Reader::read_header(BufReader::new(f), size).with_context(|| format!("{} — не MP4 или файл повреждён", path.display()))
 }
 
-fn video_track_id(r: &Mp4Reader<BufReader<File>>) -> Result<u32> {
+pub(crate) fn video_track_id(r: &Mp4Reader<BufReader<File>>) -> Result<u32> {
     r.tracks()
         .iter()
         .find(|(_, t)| matches!(t.track_type(), Ok(TrackType::Video)))

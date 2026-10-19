@@ -4,6 +4,7 @@
 mod clips;
 mod indicator;
 mod library;
+mod montage;
 mod nvidia;
 mod power;
 mod report;
@@ -1842,6 +1843,8 @@ pub fn run() {
             screenshot,
             list_clips,
             trim_clip,
+            montage::montage_clip,
+            montage::cancel_montage,
             rename_clip,
             delete_clip,
             delete_clips,

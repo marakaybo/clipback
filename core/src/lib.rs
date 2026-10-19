@@ -22,6 +22,7 @@ pub mod mux;
 pub mod recorder;
 pub mod mixer;
 pub mod proctree;
+pub mod montage;
 pub mod ring;
 pub mod shot;
 pub mod sysload;

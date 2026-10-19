@@ -63,6 +63,7 @@ cd core && cargo test --release                       # 42 теста ядра
 cd core && cargo test --release -- --ignored          # запись на настоящей видеокарте
 cd app  && cargo test                                 # настройки и работа с файлами
 node ui/tests/names.test.js ui/app.js                 # разбор имён клипов
+node ui/tests/montage.test.js                         # куски монтажа, отмена, время монтажа ↔ исходника
 ```
 
 Интерфейс можно открыть и в обычном браузере (`ui/index.html` через любой локальный сервер) — он запустится с демо-данными.
