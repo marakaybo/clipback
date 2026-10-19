@@ -1212,7 +1212,7 @@ function main() {
 
   // монтаж: несколько кусков одним файлом (ui/montage.js)
   const mt = window.Montage.create({
-    S, $, tl, tToX, xToT, seek, setPlaying, updateAll, updateExport, showProgress, toast, fmt, mb, api, loadClips, audioKeep, audioGains,
+    S, $, tl, tToX, xToT, seek, setPlaying, updateAll, updateExport, renderQuality, showProgress, toast, fmt, mb, api, loadClips, audioKeep, audioGains,
     quality: () => (S.exportQuality === "discord" ? `discord:${S.discordMb}` : S.exportQuality),
   });
 
@@ -1496,6 +1496,7 @@ function main() {
     const tooLong = S.exportQuality === "discord" && !sizeFit(len, S.discordMb, exportTracks(c)).ok;
     $("#btn-export").disabled = S.busy || whole || tooLong || (mt.active() && len < 0.1);
     if (S.exportQuality === "discord") renderQuality(); // подсказка зависит от длины отрезка
+    mt.qualityHint();
     // подсказка у неактивной кнопки не всплывает — причину пишем рядом
     $("#export-why").hidden = !whole || S.busy;
     $("#btn-export").title = whole ? "Выделите на таймлайне нужный кусок, выключите дорожку, измените её громкость или выберите качество" : "Ctrl+S";

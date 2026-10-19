@@ -269,6 +269,11 @@
       const btn = $("#btn-export");
       const label = [...btn.childNodes].reverse().find((n) => n.nodeType === 3 && n.textContent.trim());
       if (label) label.textContent = on ? " Сохранить монтаж " : " Сохранить отрезок ";
+      if (on !== M.wasOn) {
+        M.wasOn = on;
+        h.renderQuality();
+        h.updateExport();
+      }
       if (!on) {
         layer.replaceChildren();
         return;
@@ -289,7 +294,7 @@
       p.forEach((pc, i) => {
         gap(prev, pc.s);
         const el = document.createElement("div");
-        el.className = "mt-piece" + (i === M.sel ? " sel" : "");
+        el.className = "mt-piece" + (i === M.sel ? " picked" : "");
         el.style.left = `${x(pc.s)}px`;
         el.style.width = `${Math.max(2, x(pc.e) - x(pc.s))}px`;
         els.push(el);
@@ -423,6 +428,10 @@
       tick,
       beforePlay,
       render,
+      // «Оригинал» у монтажа — не копия без потерь: видео перекодируется с битрейтом исходника
+      qualityHint() {
+        if (active() && isVideo() && S.exportQuality === "original") $("#quality-hint").textContent = "Как в оригинале, видео пересобирается видеокартой";
+      },
       reset,
       save,
     };
