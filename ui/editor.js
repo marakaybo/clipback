@@ -606,6 +606,8 @@
     (e) => {
       if (!E.open || e.target === textInput) return;
       if ($("#confirm").classList.contains("open")) return;
+      // ↑/↓ без выделения — к соседнему файлу в списке (редактор при этом закроется)
+      if (E.sel < 0 && (e.key === "ArrowUp" || e.key === "ArrowDown")) return;
       e.stopImmediatePropagation();
       const ctrl = e.ctrlKey || e.metaKey;
       if (ctrl && e.code === "KeyZ" && !e.shiftKey) return e.preventDefault(), undo();
@@ -664,12 +666,13 @@
   async function close(force = false) {
     if (!E.open) return;
     if (E.text) commitText();
-    if (!force && E.undo.length && !(await window.confirmBox("Закрыть без сохранения?", "Правки на этом скриншоте пропадут.", "Закрыть"))) return;
+    if (!force && E.undo.length && !(await window.confirmBox("Выйти без сохранения?", "Правки на этом скриншоте пропадут.", "Не сохранять"))) return false;
     E.open = false;
     root.hidden = true;
     E.img = null;
     E.full = null;
     if (E.onClose) E.onClose();
+    return true;
   }
 
   function exportPng() {
@@ -728,5 +731,5 @@
     }
   }
 
-  window.ImageEditor = { open, close, isOpen: () => E.open };
+  window.ImageEditor = { open, close, isOpen: () => E.open, dirty: () => E.open && E.undo.length > 0 };
 })();

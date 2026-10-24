@@ -627,6 +627,7 @@ function main() {
 
   let pickAnchor = null;
   function pickToggle(c) {
+    if (leaveEditor(() => pickToggle(c))) return;
     // первый Ctrl-щелчок берёт в выбор и открытый клип
     if (!S.picked.size && S.clip && S.clip.path !== c.path) S.picked.add(S.clip.path);
     if (S.picked.has(c.path)) S.picked.delete(c.path);
@@ -635,6 +636,7 @@ function main() {
     renderClipList();
   }
   function pickRange(c) {
+    if (leaveEditor(() => pickRange(c))) return;
     const list = visible();
     const from = list.findIndex((x) => x.path === (pickAnchor || (S.clip && S.clip.path)));
     const to = list.findIndex((x) => x.path === c.path);
@@ -885,7 +887,20 @@ function main() {
     video.load();
   }
 
+  /// Выбрали другой файл, пока открыт редактор скриншота, — выходим из редактора.
+  /// Правки без спроса не теряются: «Выйти без сохранения?». true — выбор ждёт ответа.
+  function leaveEditor(then, force = false) {
+    const ed = window.ImageEditor;
+    if (!ed || !ed.isOpen()) return false;
+    if (force || !ed.dirty()) return ed.close(true), false;
+    ed.close().then((left) => (left ? then() : markActiveClip()));
+    return true;
+  }
+
   function selectClip(c, fromReload = false) {
+    // файл, открытый в редакторе, удалили — правкам некуда сохраниться, выходим сразу
+    const gone = fromReload && S.clip && !S.clips.some((x) => x.path === S.clip.path);
+    if ((!c || !S.clip || c.path !== S.clip.path) && leaveEditor(() => selectClip(c, fromReload), gone)) return;
     const same = S.clip && c && S.clip.path === c.path && S.clip.modified === c.modified;
     S.clip = c;
     // открытая скрытая запись снова прячется, как только выбрали другой клип
