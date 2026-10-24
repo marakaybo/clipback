@@ -156,7 +156,7 @@ fn transcode_and_peaks_on_real_clip() {
     for q in ["high", "medium", "low"] {
         let dst = std::env::temp_dir().join(format!("clipback-transcode-{q}.mp4"));
         let t = Instant::now();
-        let r = transcode(&src, &dst, 3.0, 9.0, None, None, &Quality::preset(q).unwrap(), &mut |_| {}).unwrap();
+        let r = transcode(&src, &dst, 3.0, 9.0, None, None, &Quality::preset(q).unwrap(), &mut |_| {}, &clipback_core::media::NEVER).unwrap();
         let o = mux::clip_info(&dst).unwrap();
         let size = std::fs::metadata(&dst).unwrap().len() as f64 / 1048576.0;
         println!("{q}: {:.2}–{:.2} с за {:?} → {:.2} с, {}×{}, {:.0} к/с, {size:.1} МБ, дорожки {:?}", r.start, r.end, t.elapsed(), o.duration, o.width, o.height, o.fps, o.audio_names);
@@ -167,7 +167,7 @@ fn transcode_and_peaks_on_real_clip() {
     }
     // без микрофона и общей дорожки
     let dst = std::env::temp_dir().join("clipback-transcode-nomic.mp4");
-    transcode(&src, &dst, 0.0, 2.0, Some(&[1]), None, &Quality::preset("low").unwrap(), &mut |_| {}).unwrap();
+    transcode(&src, &dst, 0.0, 2.0, Some(&[1]), None, &Quality::preset("low").unwrap(), &mut |_| {}, &clipback_core::media::NEVER).unwrap();
     assert_eq!(mux::clip_info(&dst).unwrap().audio_tracks, 1);
 }
 
