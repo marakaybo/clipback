@@ -1783,6 +1783,8 @@ pub fn run() {
             // клипы, которые не успели уйти в корзину в прошлый раз
             trash::flush_leftovers(&settings.out_dir);
             let _ = app.asset_protocol_scope().allow_directory(&settings.out_dir, true);
+            // дорожки клипа для плеера (export::preview_tracks)
+            let _ = app.asset_protocol_scope().allow_directory(export::tracks_dir(), true);
             let record = settings.record_on_start;
             app.manage(AppState {
                 inner: Mutex::new(Inner { settings, ..Default::default() }),
@@ -1841,6 +1843,7 @@ pub fn run() {
             export::cancel_export,
             export::one_track_clips,
             export::share_copy,
+            export::preview_tracks,
             rename_clip,
             delete_clip,
             delete_clips,

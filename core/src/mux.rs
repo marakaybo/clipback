@@ -733,6 +733,25 @@ pub fn one_track(src: &Path, dst: &Path, gains: Option<&[f32]>, progress: &mut d
     Ok(())
 }
 
+/// Одна звуковая дорожка клипа отдельным файлом .m4a, без перекодирования — для плеера
+/// в интерфейсе: `<video>` играет только первую дорожку, остальные он слушает так.
+/// Время дорожки совпадает с временем клипа.
+pub fn extract_audio(src: &Path, dst: &Path, track: usize) -> Result<()> {
+    let (tracks, _) = read_audio_segment(src, 0.0, f64::MAX / 4.0, Some(&[track]))?;
+    let Some(t) = tracks.into_iter().next() else { bail!("нет такой звуковой дорожки") };
+    let tmp = dst.with_extension("part");
+    let r = (|| {
+        let mut w = new_writer(&tmp)?;
+        add_audio(&mut w, our_aac(), crate::audio::RATE)?;
+        for p in &t {
+            w.write_sample(1, &audio_sample(p.pos.max(0), Bytes::copy_from_slice(&p.data)))?;
+        }
+        w.write_end()?;
+        Ok(())
+    })();
+    finish(&tmp, dst, r)
+}
+
 /// Кадры AAC звуковых дорожек на отрезке [start; end) секунд и их названия.
 /// Позиции — в отсчётах 48 кГц от начала отрезка (первый кадр может начинаться чуть раньше нуля).
 pub fn read_audio_segment(src: &Path, start: f64, end: f64, keep: Option<&[usize]>) -> Result<(Vec<Vec<Arc<AudioPacket>>>, Vec<String>)> {

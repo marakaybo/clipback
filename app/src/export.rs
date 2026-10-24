@@ -103,7 +103,12 @@ fn share_path(p: &Path, gains: Option<&[f32]>) -> Option<PathBuf> {
 
 /// Убрать копии старше суток и лишние сверх пяти (новые остаются).
 pub fn clean_share(keep: Option<&Path>) {
-    let Ok(rd) = std::fs::read_dir(share_dir()) else { return };
+    clean_dir(&share_dir(), SHARE_MAX, keep);
+}
+
+/// Убрать из `root` папки старше суток и лишние сверх `max` (новые остаются).
+fn clean_dir(root: &Path, max: usize, keep: Option<&Path>) {
+    let Ok(rd) = std::fs::read_dir(root) else { return };
     let now = SystemTime::now();
     let mut dirs: Vec<(SystemTime, PathBuf)> = rd
         .flatten()
@@ -113,7 +118,7 @@ pub fn clean_share(keep: Option<&Path>) {
     dirs.sort_by(|a, b| b.0.cmp(&a.0));
     for (k, (t, d)) in dirs.iter().enumerate() {
         let old = now.duration_since(*t).unwrap_or_default() > SHARE_KEEP;
-        if (old || k >= SHARE_MAX) && keep.is_none_or(|x| !x.starts_with(d)) {
+        if (old || k >= max) && keep.is_none_or(|x| !x.starts_with(d)) {
             let _ = std::fs::remove_dir_all(d);
         }
     }
@@ -161,6 +166,35 @@ pub async fn copy_clip(app: AppHandle, path: String, audio_gains: Option<Vec<f32
     blocking(move || {
         let f = share_file(&app, &p, audio_gains.as_deref())?;
         winutil::copy_file_to_clipboard(&f).map_err(|e| format!("{e:#}"))
+    })
+    .await
+}
+
+// ---------- дорожки для плеера ----------
+
+/// Звуковые дорожки клипа отдельными файлами: `<video>` играет только первую, а плеер
+/// должен звучать как сохранённый отрезок — с выключенными дорожками и их громкостью.
+pub fn tracks_dir() -> PathBuf {
+    std::env::temp_dir().join("Clipback").join("tracks")
+}
+
+/// Файлы .m4a дорожек `tracks` (номера в клипе), в том же порядке. Делаются один раз на
+/// версию клипа (копирование без перекодирования — доли секунды), хранятся сутки.
+#[tauri::command]
+pub async fn preview_tracks(app: AppHandle, path: String, tracks: Vec<usize>) -> Res<Vec<String>> {
+    let p = checked_path(&app, &path)?;
+    blocking(move || {
+        let dir = tracks_dir().join(share_key(&p, None));
+        let mut out = Vec::new();
+        for i in tracks {
+            let f = dir.join(format!("{i}.m4a"));
+            if !f.exists() {
+                mux::extract_audio(&p, &f, i).map_err(|e| format!("{e:#}"))?;
+            }
+            out.push(f.to_string_lossy().into_owned());
+        }
+        clean_dir(&tracks_dir(), 8, Some(&dir));
+        Ok(out)
     })
     .await
 }

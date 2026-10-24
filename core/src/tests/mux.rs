@@ -284,3 +284,18 @@ fn trim_reports_progress_and_can_be_cancelled() {
     assert_eq!(e.to_string(), "отменено");
     assert!(!dst.exists() && !dst.with_extension("part").exists(), "после отмены файлов не остаётся");
 }
+
+#[test]
+fn extracted_track_is_the_same_audio() {
+    let _mf = crate::media::MfScope::new().unwrap();
+    let src = old_style_clip("extract-src.mp4", 3, true);
+    let dst = tmp("extract-mic.m4a");
+    extract_audio(&src, &dst, 2).unwrap();
+    let (a, _) = read_audio_segment(&src, 0.0, 100.0, Some(&[2])).unwrap();
+    let (b, _) = read_audio_segment(&dst, 0.0, 100.0, None).unwrap();
+    assert_eq!(b.len(), 1, "в файле одна дорожка");
+    assert_eq!(a[0].len(), b[0].len());
+    assert!(a[0].iter().zip(&b[0]).all(|(x, y)| x.data == y.data && x.pos == y.pos), "кадры скопированы как есть и в то же время");
+    assert!(extract_audio(&src, &tmp("extract-none.m4a"), 9).is_err());
+    assert!(!tmp("extract-none.part").exists());
+}

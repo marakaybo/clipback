@@ -875,6 +875,8 @@ function main() {
   const vctx = vc.getContext("2d");
   const stage = $("#stage");
   video.crossOrigin = "anonymous";
+  // звук по дорожкам: выключенные и приглушённые дорожки слышны и в плеере (ui/trackaudio.js)
+  const trackAudio = TrackAudio.create(video, { api, fileUrl: api.fileUrl });
 
   function mediaUrl(c) {
     // ?v= — чтобы после обрезки «на месте» плеер не показал старую версию файла
@@ -883,6 +885,7 @@ function main() {
 
   function releaseMedia() {
     setPlaying(false);
+    trackAudio.set(null);
     video.removeAttribute("src");
     video.load();
   }
@@ -969,6 +972,7 @@ function main() {
     $("#tc-dur").textContent = fmt(c.duration);
     buildTimeline();
     updateAll();
+    playTracks();
   }
 
   // Загрузка видео может оборваться (код 2 — «сеть»): например, оверлей грузит клип, пока
@@ -1133,13 +1137,13 @@ function main() {
   video.volume = savedVol / 100;
   $("#vol").addEventListener("input", (e) => {
     video.volume = e.target.value / 100;
-    video.muted = false;
+    trackAudio.setMuted(false);
     renderVolume();
     localStorageSet("clipback.volume", e.target.value);
   });
-  $("#btn-mute").onclick = () => { video.muted = !video.muted; renderVolume(); };
+  $("#btn-mute").onclick = () => { trackAudio.setMuted(!trackAudio.muted()); renderVolume(); };
   function renderVolume() {
-    const off = video.muted || video.volume === 0;
+    const off = trackAudio.muted() || video.volume === 0;
     $("#vol-icon").innerHTML = off
       ? `<path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M17 9l4 6M21 9l-4 6"/>`
       : `<path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M16 9a4 4 0 0 1 0 6"/>`;
@@ -1346,6 +1350,7 @@ function main() {
         S.trackOn[t.index] = cb.checked;
         row.classList.toggle("off", !cb.checked);
         updateExport();
+        playTracks();
       });
       name.addEventListener("pointerdown", (e) => e.stopPropagation());
       row.append(name);
@@ -1369,6 +1374,7 @@ function main() {
         show();
         repaintTrack(row);
         updateExport();
+        playTracks();
       };
       range.addEventListener("input", () => set(+range.value));
       vol.addEventListener("dblclick", () => set(100));
@@ -1396,6 +1402,7 @@ function main() {
 
   async function drawPeaks(c) {
     const token = ++peaksToken;
+    if (!shownPeaks || shownPeaks.clip !== c) shownPeaks = null;
     let peaks;
     try {
       peaks = c.demo ? demoPeaks(c) : await api.call("audio_peaks", { path: c.path, bins: 600 });
@@ -1403,8 +1410,19 @@ function main() {
       return;
     }
     if (token !== peaksToken || S.clip !== c) return;
-    shownPeaks = peaks;
+    shownPeaks = Object.assign(peaks, { clip: c });
     for (const row of $$("#tracks .track")) repaintTrack(row);
+    playTracks();
+  }
+
+  /// Плеер звучит как сохранённый отрезок: какие дорожки и с какой громкостью играть.
+  function playTracks() {
+    const c = S.clip;
+    if (!c || c.kind !== "video" || c.broken || c.demo) return trackAudio.set(null);
+    const names = trackNames(c);
+    const p = (i) => shownPeaks && shownPeaks[i];
+    const lv = shownPeaks ? TrackAudio.level(p(names.indexOf("Звук системы")), p(names.indexOf("Микрофон"))) : null;
+    trackAudio.set(c, TrackAudio.plan(names, isOn, volOf, lv));
   }
 
   function demoPeaks(c) {
@@ -2421,7 +2439,7 @@ function main() {
       case "End": seek(S.outT); break;
       case "ArrowUp": e.preventDefault(); if (idx > 0) selectClip(list[idx - 1]); focusActiveClip(); break;
       case "ArrowDown": e.preventDefault(); if (idx >= 0 && idx < list.length - 1) selectClip(list[idx + 1]); focusActiveClip(); break;
-      case "KeyM": video.muted = !video.muted; renderVolume(); break;
+      case "KeyM": trackAudio.setMuted(!trackAudio.muted()); renderVolume(); break;
       case "KeyF": setFullView(!isFullView()); break;
       case "KeyE": editShot(); break;
       case "F2": e.preventDefault(); title.click(); break;

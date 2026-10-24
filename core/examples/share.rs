@@ -2,6 +2,7 @@
 //!
 //!   cargo run --release --example share -- one <клип.mp4> <выход.mp4> [--gains 1,1,0.5]
 //!   cargo run --release --example share -- trim <клип.mp4> <выход.mp4> <начало> <конец> [--gains …]
+//!   cargo run --release --example share -- track <клип.mp4> <выход.m4a> <номер дорожки>
 
 use anyhow::{bail, Context, Result};
 use clipback_core::{media, mux};
@@ -30,6 +31,7 @@ fn main() -> Result<()> {
             let (s, e) = (args[3].parse()?, args[4].parse()?);
             mux::trim_tracks_with(src, dst, s, e, None, gains.as_deref(), &mut progress, &media::NEVER)?;
         }
+        "track" => mux::extract_audio(src, dst, args[3].parse()?)?,
         _ => bail!("неизвестная команда"),
     }
     println!("готово за {:.2} с, событий хода работы: {steps}", t.elapsed().as_secs_f64());
