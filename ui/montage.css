@@ -19,7 +19,6 @@
 
 /* сохранение монтажа — всегда копией рядом с оригиналом */
 .montage-on .field:has(#save-mode) { display: none; }
-.export > .mt-cancel { margin-bottom: 6px; }
 
 /* назначение клавиш в настройках */
 .mt-key { min-width: 160px; height: 30px; padding: 0 12px; border-radius: var(--r); background: var(--s1); border: 1px solid var(--line); font-family: var(--mono); font-size: var(--fs-sm); flex: none; }

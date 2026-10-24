@@ -27,6 +27,15 @@
   const H = 3600e3;
 
   let montageCancel = false;
+  // демо долгой работы: ход 0…1 событиями, «Отмена» обрывает
+  async function fakeWork(steps, ms) {
+    montageCancel = false;
+    for (let i = 1; i <= steps; i++) {
+      await new Promise((r) => setTimeout(r, ms));
+      if (montageCancel) throw "отменено";
+      emit("export-progress", i / steps);
+    }
+  }
   let seq = 1;
   const mk = (name, ageMs, duration, hue, kind = "video", extra = {}) => ({
     path: `demo://${seq++}`,
@@ -211,9 +220,8 @@
       return c;
     },
     trim_clip: async ({ path, start, end, replace, audioKeep, quality }) => {
-      if (quality && quality !== "original") {
-        for (let i = 1; i <= 10; i++) { await new Promise((r) => setTimeout(r, 80)); emit("export-progress", i / 10); }
-      }
+      // без перекодирования быстро, с ним — дольше
+      await (quality && quality !== "original" ? fakeWork(40, 100) : fakeWork(12, 60));
       const c = find(path);
       if (!c) throw "файл не найден";
       const tracks = audioKeep ? audioKeep.length : c.audioTracks;
@@ -232,12 +240,7 @@
     },
     // монтаж: куски подряд одним файлом; «Отмена» обрывает сохранение
     montage_clip: async ({ path, pieces }) => {
-      montageCancel = false;
-      for (let i = 1; i <= 20; i++) {
-        await new Promise((r) => setTimeout(r, 120));
-        if (montageCancel) throw "отменено";
-        emit("export-progress", i / 20);
-      }
+      await fakeWork(30, 120);
       const c = find(path);
       if (!c) throw "файл не найден";
       const dur = pieces.reduce((a, [s, e]) => a + (e - s), 0);
@@ -247,6 +250,27 @@
       return { clip: n, duration: dur, pieces: pieces.length };
     },
     cancel_montage: () => { montageCancel = true; },
+    cancel_export: () => { montageCancel = true; },
+    // копия с одной дорожкой: в буфер обмена, для перетаскивания и рядом с оригиналом
+    copy_clip: async ({ path }) => {
+      if (find(path).audioTracks > 1) await fakeWork(10, 60);
+    },
+    share_copy: async ({ path }) => {
+      await fakeWork(10, 60);
+      return path;
+    },
+    one_track_clips: async ({ paths }) => {
+      await fakeWork(25 * paths.length, 70);
+      const out = paths.map((p) => {
+        const c = find(p);
+        const n = mk(`${c.name} (одна дорожка)`, 0, c.duration, c.hue, "video", { seed: c.seed, markers: c.markers, audioTracks: 1, audioNames: ["Всё вместе"] });
+        n.size = Math.round(c.size * 0.97);
+        clips.push(n);
+        return n;
+      });
+      emit("clips-changed");
+      return out;
+    },
     rename_clip: ({ path, name }) => {
       const c = find(path);
       if (clips.some((x) => x !== c && x.name === name)) throw "файл с таким именем уже есть";
@@ -298,7 +322,7 @@
     pick_folder: () => (state.folderProblem ? "D:\\Клипы" : null),
     hide_overlay_cmd: () => { document.body.classList.add("closed"); document.documentElement.classList.remove("overlay-open"); },
     show_main_cmd: () => {}, window_painted: () => {},
-    reveal_clip: () => {}, open_clips_folder: () => {}, copy_clip: () => {}, frontend_log: () => {}, quit_app: () => {},
+    reveal_clip: () => {}, open_clips_folder: () => {}, frontend_log: () => {}, quit_app: () => {},
   };
 
   window.api = {

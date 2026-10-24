@@ -97,6 +97,7 @@
         <div class="pick-bar" id="pick-bar" hidden>
           <span id="pick-info"></span>
           <button class="btn btn-ghost sm-btn" id="pick-hide" title="Скрыть выбранные — превью будет размыто">Скрыть</button>
+          <button class="btn btn-ghost sm-btn" id="pick-one" title="Копии рядом с клипами: голос и игра на одной звуковой дорожке — для Discord, Telegram и плееров" hidden>Одна дорожка</button>
           <button class="btn btn-ghost sm-btn danger-btn" id="pick-delete">В корзину</button>
           <button class="icon-btn sm" id="pick-clear" title="Снять выделение (Esc)"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
         </div>
@@ -142,6 +143,18 @@
               <b>Скрытая запись</b>
               <span>Превью размыто от чужих глаз</span>
               <button class="btn btn-accent" id="veil-show">Показать</button>
+            </div>
+            <div class="work" id="work" role="status" aria-live="polite" hidden>
+              <div class="work-box">
+                <div class="work-head"><b class="work-name"></b><span class="work-pct mono"></span></div>
+                <div class="progress"><div class="progress-fill"></div></div>
+                <div class="work-sub" hidden></div>
+                <div class="work-actions">
+                  <button class="btn btn-ghost work-cancel">Отмена</button>
+                  <button class="btn btn-ghost work-close" hidden>Закрыть</button>
+                  <button class="btn btn-accent work-reveal" hidden>Показать в папке</button>
+                </div>
+              </div>
             </div>
             <button class="big-play" id="big-play" title="Воспроизвести (Пробел)"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
           </div>
@@ -298,7 +311,6 @@
           <div><span class="muted">≈ Размер</span><b id="est-size">0 МБ</b></div>
         </div>
 
-        <div class="progress" id="export-progress" hidden><div class="progress-fill"></div></div>
         <div class="hint export-why" id="export-why" hidden>Выделите кусок на таймлайне</div>
 
         <button class="btn btn-accent wide" id="btn-export">
@@ -308,6 +320,10 @@
         <button class="btn btn-ghost wide" id="btn-frame">
           <svg viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>
           Сохранить кадр
+        </button>
+        <button class="btn btn-ghost wide" id="btn-one" title="Копия рядом с клипом: голос и игра на одной звуковой дорожке — так её правильно сыграют Discord, Telegram и любые плееры" hidden>
+          <svg viewBox="0 0 24 24"><path d="M4 12h3l2-5 3 10 3-8 2 3h3"/></svg>
+          Одна дорожка
         </button>
       </aside>
     </div>
@@ -597,6 +613,7 @@
   <script src="api.js"></script>
   <textarea class="ed-text" id="ed-text" rows="1" spellcheck="false" hidden></textarea>
   <script src="montage.js"></script>
+  <script src="work.js"></script>
   <script src="app.js"></script>
   <script src="editor.js"></script>
   <script src="widgets.js"></script>

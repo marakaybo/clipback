@@ -177,6 +177,10 @@ function main() {
     }
   }
 
+  // слой «идёт сохранение» поверх видео (ui/work.js): проценты приходят от ядра
+  const work = Work.create($("#work"), { api, reveal: (path) => call("reveal_clip", { path }, "Не удалось открыть папку").catch(() => {}) });
+  api.on("export-progress", (f) => work.progress(f));
+
   // ---------- подтверждение ----------
   let confirmResolve = null;
   window.confirmBox = confirmBox;
@@ -651,6 +655,7 @@ function main() {
     $("#pick-bar").hidden = sel.length < 1;
     $("#pick-info").textContent = `Выбрано: ${sel.length} · ${mb(sel.reduce((a, c) => a + c.size, 0))}`;
     $("#pick-hide").textContent = sel.length && sel.every((c) => c.hidden) ? "Показывать" : "Скрыть";
+    $("#pick-one").hidden = !sel.some(multiTrack);
   }
   $("#pick-clear").onclick = pickClear;
   $("#pick-delete").onclick = () => deleteClips(S.clips.filter((c) => S.picked.has(c.path)));
@@ -679,6 +684,9 @@ function main() {
       }
     },
   };
+  // кнопка мыши ещё зажата — пока готовится копия с одной дорожкой, клип можно «держать»
+  let dragHeld = false;
+  addEventListener("pointerdown", (e) => { if (e.button === 0) dragHeld = true; }, true);
   addEventListener("pointermove", (e) => {
     const p = dragOut.pending;
     if (!p) return;
@@ -690,9 +698,32 @@ function main() {
     dragOut.pending = null;
     setTimeout(() => document.body.classList.remove("grabbing"), 300);
     if (p.c.demo) return toast("Перетаскивание", "В программе клип можно бросить в Discord или папку", "copy");
-    api.call("start_drag", { path: p.c.path, iconPngBase64: dragOut.icon(p.thumbEl, p.c.hidden) }).catch((err) => toast("Не получилось перетащить", String(err), "error"));
+    dragClip(p.c, dragOut.icon(p.thumbEl, p.c.hidden));
   });
-  addEventListener("pointerup", () => ((dragOut.pending = null), document.body.classList.remove("grabbing")));
+  addEventListener("pointerup", () => ((dragOut.pending = null), (dragHeld = false), document.body.classList.remove("grabbing")));
+
+  /// В другие программы уходит копия с одной дорожкой: Discord и плееры играют только первую.
+  async function dragClip(c, icon) {
+    let path = c.path;
+    if (multiTrack(c)) {
+      if (S.busy) return toast("Подождите", "Идёт сохранение — перетащите клип, когда оно закончится", "info");
+      S.busy = true;
+      work.start("Готовлю файл с одной дорожкой…");
+      try {
+        path = await api.call("share_copy", { path: c.path, audioGains: c === S.clip ? audioGains(c) : null });
+      } catch (e) {
+        if (!cancelled(e)) toast("Не получилось подготовить файл", String(e), "error");
+        return;
+      } finally {
+        work.fail();
+        S.busy = false;
+        updateExport();
+      }
+      // пока готовили, кнопку отпустили — второй раз копия уже готова, перетащится сразу
+      if (!dragHeld) return toast("Файл готов", "Перетащите клип ещё раз", "check");
+    }
+    api.call("start_drag", { path, iconPngBase64: icon }).catch((err) => toast("Не получилось перетащить", String(err), "error"));
+  }
 
   function fillListThumb(el) {
     const c = S.clips.find((x) => x.path === el.dataset.path);
@@ -1213,7 +1244,7 @@ function main() {
 
   // монтаж: несколько кусков одним файлом (ui/montage.js)
   const mt = window.Montage.create({
-    S, $, tl, tToX, xToT, seek, setPlaying, updateAll, updateExport, renderQuality, showProgress, toast, fmt, mb, api, loadClips, audioKeep, audioGains,
+    S, $, tl, tToX, xToT, seek, setPlaying, updateAll, updateExport, renderQuality, showProgress, work, toast, fmt, mb, api, loadClips, audioKeep, audioGains,
     quality: () => (S.exportQuality === "discord" ? `discord:${S.discordMb}` : S.exportQuality),
   });
 
@@ -1500,15 +1531,20 @@ function main() {
     mt.qualityHint();
     // подсказка у неактивной кнопки не всплывает — причину пишем рядом
     $("#export-why").hidden = !whole || S.busy;
+    $("#btn-one").hidden = !multiTrack(c) || mt.active();
     $("#btn-export").title = whole ? "Выделите на таймлайне нужный кусок, выключите дорожку, измените её громкость или выберите качество" : "Ctrl+S";
   }
 
   function showProgress(f) {
-    const bar = $("#export-progress");
-    bar.hidden = f === null;
-    if (f !== null) bar.firstElementChild.style.width = `${Math.round(f * 100)}%`;
+    if (f !== null) work.progress(f);
   }
-  api.on("export-progress", (f) => { if (S.busy) showProgress(f); });
+  const cancelled = (e) => /отменено/.test(String(e));
+
+  /// Что делает «Сохранить отрезок» — для слоя прогресса.
+  function exportAction(replace) {
+    if (S.exportQuality === "discord") return `Сжимаю под ${S.discordMb} МБ…`;
+    return replace ? "Обрезаю клип…" : "Сохраняю отрезок…";
+  }
 
   async function exportClip() {
     const c = S.clip;
@@ -1520,7 +1556,7 @@ function main() {
     S.busy = true;
     updateExport();
     const reencode = S.exportQuality !== "original";
-    if (reencode) showProgress(0);
+    work.start(exportAction(replace));
     if (replace) {
       releaseMedia();
       thumbs.forget(c.path);
@@ -1538,14 +1574,16 @@ function main() {
       const shift = S.inT - r.start;
       const note = shift > 0.05 ? ` · начало на ${shift.toFixed(1)} с раньше (ключевой кадр)` : "";
       const q = !reencode ? "" : S.exportQuality === "discord" ? ` · ${mb(r.clip.size)} из ${S.discordMb} МБ` : ` · ${QUALITY[S.exportQuality].name.toLowerCase()} качество, ${mb(r.clip.size)}`;
-      toast(replace ? "Клип обрезан" : "Отрезок сохранён", `${fmt(r.end - r.start, 1)}${q}${note}`, "scissors");
+      const sub = `${fmt(r.end - r.start, 1)}${q}${note}`;
+      if (!work.done(`${replace ? "Клип обрезан" : "Отрезок сохранён"} · ${sub}`, r.clip.path)) toast(replace ? "Клип обрезан" : "Отрезок сохранён", sub, "scissors");
       await loadClips(r.clip.path);
     } catch (e) {
-      toast("Не удалось сохранить отрезок", String(e), "error");
+      work.fail();
+      if (cancelled(e)) toast("Сохранение отменено", replace ? "Клип остался как был" : "", "info");
+      else toast("Не удалось сохранить отрезок", String(e), "error");
       if (replace) selectClip(c);
     } finally {
       S.busy = false;
-      showProgress(null);
       updateExport();
     }
   }
@@ -1650,14 +1688,55 @@ function main() {
 
   // ---------- действия с клипом ----------
   $("#btn-copy").onclick = async () => {
-    if (!S.clip) return;
+    const c = S.clip;
+    if (!c || S.busy) return;
+    const one = multiTrack(c);
+    S.busy = true;
+    if (one) work.start("Готовлю файл с одной дорожкой…");
     try {
-      await api.call("copy_clip", { path: S.clip.path });
-      toast("Файл скопирован", "Вставьте его в Discord или Telegram через Ctrl+V", "copy");
+      await api.call("copy_clip", { path: c.path, audioGains: c === S.clip ? audioGains(c) : null });
+      work.fail(); // для копирования «Готово» не нужно — скажет уведомление
+      toast("Файл скопирован", one ? "Голос и игра на одной дорожке — вставьте через Ctrl+V в Discord или Telegram" : "Вставьте его в Discord или Telegram через Ctrl+V", "copy");
     } catch (e) {
-      toast("Не удалось скопировать", String(e), "error");
+      work.fail();
+      if (cancelled(e)) toast("Копирование отменено", "", "info");
+      else toast("Не удалось скопировать", String(e), "error");
+    } finally {
+      S.busy = false;
+      updateExport();
     }
   };
+
+  // ---------- «Одна дорожка»: копия рядом с клипом для отправки из папки ----------
+  /// В клипе несколько звуковых дорожек — плееры и мессенджеры сыграют только первую.
+  function multiTrack(c) {
+    return !!c && c.kind === "video" && !c.broken && (c.audioTracks || 0) > 1;
+  }
+
+  async function oneTrack(list) {
+    list = list.filter(multiTrack);
+    if (!list.length || S.busy) return;
+    S.busy = true;
+    updateExport();
+    work.start(list.length === 1 ? "Делаю копию с одной дорожкой…" : `Делаю копии с одной дорожкой (${list.length})…`);
+    try {
+      const single = list.length === 1 && list[0] === S.clip;
+      const r = await api.call("one_track_clips", { paths: list.map((c) => c.path), audioGains: single ? audioGains(list[0]) : null });
+      const sub = r.length === 1 ? `${clipTitle(r[0])} · ${mb(r[0].size)}` : `${r.length} шт. рядом с оригиналами`;
+      if (!work.done(sub, r[0].path)) toast("Копия с одной дорожкой готова", sub, "check");
+      S.picked.clear();
+      await loadClips(list.length === 1 ? r[0].path : undefined);
+    } catch (e) {
+      work.fail();
+      if (cancelled(e)) toast("Отменено", "", "info");
+      else toast("Не удалось сделать копию", String(e), "error");
+    } finally {
+      S.busy = false;
+      updateExport();
+    }
+  }
+  $("#btn-one").onclick = () => oneTrack([S.clip]);
+  $("#pick-one").onclick = () => oneTrack(S.clips.filter((c) => S.picked.has(c.path)));
   $("#btn-reveal").onclick = () => S.clip && call("reveal_clip", { path: S.clip.path }, "Не удалось открыть папку");
 
   // в корзину: по умолчанию спрашиваем, галочка «Больше не спрашивать» выключает вопрос

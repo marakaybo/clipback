@@ -143,12 +143,6 @@
     const hint = document.createElement("div");
     hint.className = "mt-hint";
     tl.after(hint);
-    const cancelBtn = document.createElement("button");
-    cancelBtn.className = "btn btn-ghost wide mt-cancel";
-    cancelBtn.textContent = "Отмена";
-    cancelBtn.hidden = true;
-    $("#export-progress").after(cancelBtn);
-    cancelBtn.onclick = () => h.api.call("cancel_montage").catch(() => {});
 
     function apply(next) {
       if (!M.hist.apply(next)) return;
@@ -345,10 +339,8 @@
       if (!p.length || Cuts.total(p) < 0.1) return h.toast("Нечего сохранять", "Все куски убраны — Ctrl+Z вернёт", "error");
       S.busy = true;
       M.saving = true;
-      cancelBtn.hidden = false;
-      cancelBtn.disabled = false;
       h.updateExport();
-      h.showProgress(0);
+      h.work.start(h.quality().startsWith("discord:") ? "Сжимаю монтаж под размер…" : "Сохраняю монтаж…");
       try {
         const r = await h.api.call("montage_clip", {
           path: c.path,
@@ -357,17 +349,17 @@
           audioGains: h.audioGains(c),
           quality: h.quality(),
         });
-        h.toast("Монтаж сохранён", `${h.fmt(r.duration, 1)} · ${r.pieces} ${plural(r.pieces)} · ${h.mb(r.clip.size)}`, "scissors");
+        const sub = `${h.fmt(r.duration, 1)} · ${r.pieces} ${plural(r.pieces)} · ${h.mb(r.clip.size)}`;
+        if (!h.work.done(`Монтаж сохранён · ${sub}`, r.clip.path)) h.toast("Монтаж сохранён", sub, "scissors");
         S.busy = false;
         await h.loadClips(r.clip.path);
       } catch (e) {
+        h.work.fail();
         if (/отменено/.test(String(e))) h.toast("Сохранение отменено", "", "info");
         else h.toast("Не удалось сохранить монтаж", String(e), "error");
       } finally {
         S.busy = false;
         M.saving = false;
-        cancelBtn.hidden = true;
-        h.showProgress(null);
         h.updateExport();
       }
     }

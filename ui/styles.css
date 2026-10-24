@@ -387,6 +387,20 @@ html[data-mode="overlay"] .panel, html[data-mode="browser"] .panel { background:
 .app.veiled .tslot canvas { filter: blur(8px) saturate(.5); transform: scale(1.4); }
 .hide-btn.on { color: var(--accent); }
 
+/* слой «идёт сохранение» поверх видео: спокойно, без анимаций, кроме самой полосы */
+.work { position: absolute; inset: 0; z-index: 4; display: grid; place-items: center; padding: var(--sp-6); background: rgba(12,13,15,.62); }
+.work-box { width: min(360px, 100%); padding: var(--sp-4) var(--sp-4) var(--sp-3); border-radius: var(--r-panel); border: 1px solid var(--line); background: var(--overlay-bg); box-shadow: var(--overlay-shadow); }
+.work-head { display: flex; align-items: baseline; gap: var(--sp-3); }
+.work-name { flex: 1; min-width: 0; font-size: var(--fs-lg); color: var(--text); }
+.work-pct { font-size: var(--fs); color: var(--text-2); }
+.work .progress { margin: var(--sp-3) 0 0; height: 6px; border-radius: 3px; }
+.work.done .progress-fill { background: var(--ok); }
+.work-sub { margin-top: var(--sp-2); font-size: var(--fs-sm); color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.work-actions { display: flex; justify-content: flex-end; gap: var(--sp-2); margin-top: var(--sp-3); }
+.app.working .big-play { opacity: 0; pointer-events: none; }
+/* пока идёт сохранение — то, что с ним конфликтует, недоступно */
+.app.busy-work :is(#btn-export, #btn-one, #pick-one, #btn-delete, #pick-delete, #btn-copy, #btn-frame) { opacity: var(--disabled); pointer-events: none; }
+
 .controls { display: flex; align-items: center; gap: 2px; flex: none; }
 #btn-full { margin-left: 6px; }
 .app.is-shot #btn-full, .app.no-clip #btn-full { display: none; }
