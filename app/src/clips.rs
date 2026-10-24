@@ -4,6 +4,7 @@ use anyhow::{bail, Context, Result};
 use clipback_core::{mux, shot, util};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::time::UNIX_EPOCH;
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -253,6 +254,7 @@ pub fn trim(
     audio_gains: Option<&[f32]>,
     quality: Option<&str>,
     progress: &mut dyn FnMut(f64),
+    cancel: &AtomicBool,
 ) -> Result<TrimOut> {
     let dst = if replace {
         p.to_path_buf()
@@ -263,11 +265,11 @@ pub fn trim(
     };
     // «discord:20» — уложить в 20 МБ
     if let Some(mb) = quality.and_then(|q| q.strip_prefix("discord:")).and_then(|v| v.parse::<u64>().ok()) {
-        return trim_to_size(p, &dst, start, end, audio_keep, audio_gains, mb.clamp(1, 10_000) * 1_000_000, progress);
+        return trim_to_size(p, &dst, start, end, audio_keep, audio_gains, mb.clamp(1, 10_000) * 1_000_000, progress, cancel);
     }
     let r = match quality.and_then(clipback_core::media::Quality::preset) {
-        Some(q) => clipback_core::media::transcode(p, &dst, start, end, audio_keep, audio_gains, &q, progress)?,
-        None => mux::trim_tracks(p, &dst, start, end, audio_keep, audio_gains)?,
+        Some(q) => clipback_core::media::transcode(p, &dst, start, end, audio_keep, audio_gains, &q, progress, cancel)?,
+        None => mux::trim_tracks_with(p, &dst, start, end, audio_keep, audio_gains, progress, cancel)?,
     };
     Ok(TrimOut { clip: entry(&dst)?, start: r.start, end: r.end })
 }
@@ -284,6 +286,7 @@ fn trim_to_size(
     audio_gains: Option<&[f32]>,
     limit: u64,
     progress: &mut dyn FnMut(f64),
+    cancel: &AtomicBool,
 ) -> Result<TrimOut> {
     use clipback_core::media::{transcode, Quality};
     let info = mux::clip_info(p)?;
@@ -295,7 +298,8 @@ fn trim_to_size(
     let mut squeeze = 1.0;
     for attempt in 0..3 {
         let q = Quality::for_size(limit, secs, keep.len(), squeeze)?;
-        let r = transcode(p, dst, start, end, Some(&keep), audio_gains, &q, progress)?;
+        // повторная попытка (кодировщик превысил размер) идёт по шкале заново
+        let r = transcode(p, dst, start, end, Some(&keep), audio_gains, &q, progress, cancel)?;
         let size = std::fs::metadata(dst).map(|m| m.len()).unwrap_or(0);
         if size <= limit || attempt == 2 {
             return Ok(TrimOut { clip: entry(dst)?, start: r.start, end: r.end });

@@ -408,6 +408,8 @@ fn mixer_loop(lay: Layout, mut encoders: Vec<AacEncoder>, t0: i64, out: Sender<(
 
     let mut st = MixState::new(lay.sources.len(), Instant::now());
     let mut agcs: Vec<Option<Agc>> = lay.sources.iter().map(|s| s.agc.then(Agc::new)).collect();
+    // «Всё вместе» (система + микрофон): голос выравнивается по игре
+    let mut voice: Vec<Option<crate::voicemix::VoiceMix>> = lay.tracks.iter().map(|t| (t.sources.len() == 2).then(crate::voicemix::VoiceMix::new)).collect();
     let mut packets = Vec::new();
     // сводка раз в 5 минут: какой звук на самом деле ушёл в каждую дорожку файла
     let mut report_at = Instant::now();
@@ -443,7 +445,13 @@ fn mixer_loop(lay: Layout, mut encoders: Vec<AacEncoder>, t0: i64, out: Sender<(
         }
         while let Some((pos, parts)) = st.next_block(Instant::now()) {
             for (k, (t, enc)) in lay.tracks.iter().zip(encoders.iter_mut()).enumerate() {
-                let s = render_track(t, &lay.sources, &parts);
+                let s = match voice[k].as_mut() {
+                    Some(vm) => {
+                        let src = |i: usize| parts[t.sources[i]].iter().map(|x| x * lay.sources[t.sources[i]].gain).collect::<Vec<f32>>();
+                        vm.process(&src(0), &src(1), 1.0, 1.0)
+                    }
+                    None => render_track(t, &lay.sources, &parts),
+                };
                 track_peak[k] = s.iter().fold(track_peak[k], |a, &b| a.max(b.abs()));
                 track_secs[k] += s.len() as f64 / 2.0 / RATE as f64;
                 packets.clear();

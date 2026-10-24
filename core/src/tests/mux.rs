@@ -150,3 +150,137 @@ fn default_names_by_count() {
     assert_eq!(default_track_names(1), vec!["Звук"]);
     assert_eq!(default_track_names(2), vec!["Дорожка 1", "Дорожка 2"]);
 }
+
+/// Звуковая дорожка из PCM (стерео подряд): кадры AAC с позициями от нуля.
+fn aac(pcm: &[f32]) -> Vec<Arc<AudioPacket>> {
+    let mut enc = crate::aac::AacEncoder::new().unwrap();
+    let mut out = Vec::new();
+    for (k, c) in pcm.chunks(48_000 * 2).enumerate() {
+        enc.encode(k as i64 * 48_000, c, &mut out).unwrap();
+    }
+    enc.encode((pcm.len() / 2) as i64, &vec![0.0; 1024 * 8], &mut out).unwrap();
+    out.into_iter().map(Arc::new).collect()
+}
+
+fn noise(a: f32, secs: usize) -> Vec<f32> {
+    let mut s = 7u32;
+    (0..secs * 48_000).flat_map(|_| {
+        s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+        let x = a * ((s >> 8) as f32 / (1u32 << 24) as f32 * 2.0 - 1.0);
+        [x, x]
+    }).collect()
+}
+
+fn tone(a: f32, secs: usize) -> Vec<f32> {
+    (0..secs * 48_000).flat_map(|i| {
+        let x = a * (i as f32 * 220.0 * std::f32::consts::TAU / 48_000.0).sin();
+        [x, x]
+    }).collect()
+}
+
+fn rms(v: &[f32]) -> f32 {
+    (v.iter().map(|x| x * x).sum::<f32>() / v.len().max(1) as f32).sqrt()
+}
+
+/// Клип «как из старой версии»: «Всё вместе» = система + микрофон без выравнивания, голос на 12 дБ тише.
+fn old_style_clip(name: &str, secs: usize, named: bool) -> std::path::PathBuf {
+    let p = tmp(name);
+    let (sys, mic) = (noise(0.4, secs), tone(0.1, secs));
+    let mix: Vec<f32> = sys.iter().zip(&mic).map(|(a, b)| a + b).collect();
+    let (a, b, c) = (aac(&mix), aac(&sys), aac(&mic));
+    let silence = crate::aac::silent_frame().unwrap();
+    let inputs = [&a, &b, &c].map(|t| AudioInput { packets: t, silence: &silence });
+    let names: Vec<String> = if named { default_track_names(3) } else { vec![] };
+    write_av_named(&p, &packets(secs as u32), &inputs, &names, 640, 360).unwrap();
+    p
+}
+
+/// Звуковые дорожки: (флаги tkhd, группа «одна из», название в hdlr).
+fn audio_traks(p: &std::path::Path) -> Vec<(u32, u16, String)> {
+    let r = open(p).unwrap();
+    audio_track_ids(&r)
+        .iter()
+        .map(|id| {
+            let t = &r.tracks()[id].trak;
+            (t.tkhd.flags, t.tkhd.alternate_group, t.mdia.hdlr.name.trim_end_matches('\0').to_string())
+        })
+        .collect()
+}
+
+#[test]
+fn only_first_audio_track_is_default_and_all_are_named() {
+    let _mf = crate::media::MfScope::new().unwrap();
+    let p = old_style_clip("labels.mp4", 2, true);
+    let t = audio_traks(&p);
+    assert_eq!(t.len(), 3);
+    assert_eq!(t.iter().map(|t| t.0).collect::<Vec<_>>(), vec![3, 2, 2], "включена только «Всё вместе»");
+    assert!(t.iter().all(|t| t.1 == 1), "звуковые дорожки — «одна из»");
+    let hdlr: Vec<String> = t.iter().map(|t| t.2.clone()).collect();
+    assert_eq!(hdlr, default_track_names(3));
+    assert_eq!(read_track_names(&p), Some(default_track_names(3)));
+    assert!(mix_leveled(&p), "новый файл помечен: «Всё вместе» уже выровнена");
+    // файл по-прежнему читается: кадры на месте
+    let mut r = open(&p).unwrap();
+    let ids = audio_track_ids(&r);
+    assert!(r.read_sample(ids[2], 1).unwrap().is_some());
+    assert!((clip_info(&p).unwrap().duration - 2.0).abs() < 0.05);
+}
+
+#[test]
+fn old_clip_mix_is_rebuilt_only_when_needed() {
+    let _mf = crate::media::MfScope::new().unwrap();
+    let p = old_style_clip("old-mix.mp4", 2, true);
+    assert!(!crate::media::audio_rework(&p, None, None), "новый клип без изменений — копия кадров");
+    // убрать метку — как у клипа из 0.5.5
+    let d = std::fs::read(&p).unwrap();
+    let at = d.windows(12).rposition(|w| w == b"clipback-mix").unwrap() - 8;
+    std::fs::write(&p, &d[..at]).unwrap();
+    assert!(!mix_leveled(&p));
+    assert!(crate::media::audio_rework(&p, None, None), "старый «Всё вместе» сводится заново");
+    assert!(!crate::media::audio_rework(&p, Some(&[1, 2]), None), "без «Всё вместе» — копия");
+}
+
+#[test]
+fn one_track_copy_has_leveled_voice_and_faststart() {
+    let _mf = crate::media::MfScope::new().unwrap();
+    let src = old_style_clip("one-src.mp4", 6, false);
+    assert!(!mix_leveled(&src));
+    let dst = tmp("one-dst.mp4");
+    let mut seen = Vec::new();
+    one_track(&src, &dst, None, &mut |f| seen.push(f), &crate::media::NEVER).unwrap();
+    assert!(seen.windows(2).all(|w| w[1] >= w[0] - 1e-9), "ход работы не идёт назад: {seen:?}");
+    assert_eq!(seen.last(), Some(&1.0));
+    assert!(seen.len() >= 4, "{seen:?}");
+    assert!(!dst.with_extension("1t.mp4").exists() && !dst.with_extension("fs.part").exists());
+    let info = clip_info(&dst).unwrap();
+    assert_eq!(info.audio_tracks, 1);
+    assert_eq!(info.audio_names, vec!["Всё вместе".to_string()]);
+    assert!(mix_leveled(&dst));
+    let d = std::fs::read(&dst).unwrap();
+    let pos = |t: &[u8]| d.windows(4).position(|w| w == t).unwrap();
+    assert!(pos(b"moov") < pos(b"mdat"), "оглавление в начале файла");
+    // голос подтянут: в конце (выравнивание уже сошлось) звук заметно громче старой суммы
+    let (old, _) = read_audio_segment(&src, 4.0, 6.0, Some(&[0])).unwrap();
+    let (new, _) = read_audio_segment(&dst, 4.0, 6.0, None).unwrap();
+    let (_, old) = crate::media::decode_track(&old[0]).unwrap();
+    let (_, new) = crate::media::decode_track(&new[0]).unwrap();
+    assert!(rms(&new) > rms(&old) * 1.25, "rms {} → {}", rms(&old), rms(&new));
+    assert!(new.iter().all(|x| x.abs() <= 1.0));
+}
+
+#[test]
+fn trim_reports_progress_and_can_be_cancelled() {
+    let src = tmp("prog-src.mp4");
+    write_mp4(&src, &packets(5), 640, 360).unwrap();
+    let mut seen = Vec::new();
+    trim_tracks_with(&src, &tmp("prog-dst.mp4"), 0.0, 5.0, None, None, &mut |f| seen.push(f), &crate::media::NEVER).unwrap();
+    assert_eq!(seen.first(), Some(&0.0));
+    assert_eq!(seen.last(), Some(&1.0));
+    assert!(seen.len() >= 5);
+    let stop = AtomicBool::new(true);
+    let dst = tmp("prog-cancel.mp4");
+    let _ = std::fs::remove_file(&dst);
+    let e = trim_tracks_with(&src, &dst, 0.0, 5.0, None, None, &mut |_| {}, &stop).unwrap_err();
+    assert_eq!(e.to_string(), "отменено");
+    assert!(!dst.exists() && !dst.with_extension("part").exists(), "после отмены файлов не остаётся");
+}

@@ -213,13 +213,9 @@ fn build_audio(
         return Ok((Vec::new(), Vec::new()));
     }
     let gain = |i: usize| gains.and_then(|g| g.get(i)).copied().unwrap_or(1.0).clamp(0.0, 4.0);
-    let sys = names.iter().position(|n| n == "Звук системы");
-    let mic = names.iter().position(|n| n == "Микрофон");
-    // «Всё вместе» сводится заново, только если громкость системы, микрофона или его самого менялась
-    let remix = match (names.first().map(String::as_str), sys, mic) {
-        (Some("Всё вместе"), Some(s), Some(m)) if keep.contains(&0) && !(unchanged(gain(s)) && unchanged(gain(m)) && unchanged(gain(0))) => Some((s, m)),
-        _ => None,
-    };
+    // «Всё вместе» сводится заново (с выравниванием голоса), если громкость системы,
+    // микрофона или её самой менялась, или клип записан до выравнивания
+    let remix = if keep.contains(&0) { media::remix_needed(src, names, &gain) } else { None };
     let mut need = keep.clone();
     if let Some((s, m)) = remix {
         for i in [s, m] {
@@ -229,6 +225,8 @@ fn build_audio(
         }
     }
 
+    // уровни голоса и игры меряются по первому куску (до 20 с) — дальше выравнивание подстраивается
+    let mut voice: Option<crate::voicemix::VoiceMix> = None;
     let mut encs = keep.iter().map(|_| crate::aac::AacEncoder::new()).collect::<Result<Vec<_>>>()?;
     let mut out: Vec<Vec<AudioPacket>> = keep.iter().map(|_| Vec::new()).collect();
     let all = total(pieces).max(1);
@@ -250,9 +248,14 @@ fn build_audio(
             for (j, &i) in keep.iter().enumerate() {
                 let buf = match remix {
                     Some((s, m)) if i == 0 => {
-                        let (gs, gm, g0) = (gain(s), gain(m), gain(0));
                         let (a, b) = (pcm[s].as_ref().unwrap(), pcm[m].as_ref().unwrap());
-                        a.iter().zip(b).map(|(x, y)| crate::mixer::soft_clip((x * gs + y * gm) * g0)).collect()
+                        let vm = voice.get_or_insert_with(|| crate::voicemix::VoiceMix::primed(a, b));
+                        let mut v = vm.process(a, b, gain(s), gain(m));
+                        let g0 = gain(0);
+                        if !unchanged(g0) {
+                            v.iter_mut().for_each(|x| *x = crate::mixer::soft_clip(*x * g0));
+                        }
+                        v
                     }
                     _ => {
                         let g = gain(i);
@@ -488,7 +491,7 @@ impl<'a> StreamWriter<'a> {
         w.write_end()?;
         drop(w);
         if !names.is_empty() && names.len() == self.audio.len() {
-            mux::write_track_names(self.path, names)?;
+            mux::finish_meta(self.path, names)?;
         }
         Ok(())
     }
@@ -497,7 +500,7 @@ impl<'a> StreamWriter<'a> {
 // ---------- faststart ----------
 
 /// Верхние блоки MP4: (тип, начало, размер).
-fn top_boxes(f: &mut std::fs::File) -> Result<Vec<([u8; 4], u64, u64)>> {
+pub(crate) fn top_boxes(f: &mut std::fs::File) -> Result<Vec<([u8; 4], u64, u64)>> {
     let len = f.metadata()?.len();
     let mut out = Vec::new();
     let mut pos = 0u64;

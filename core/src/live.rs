@@ -155,7 +155,7 @@ impl LiveWriter {
             w.write_end()?;
             drop(w);
             if !names.is_empty() {
-                mux::write_track_names(&tmp, &names)?;
+                mux::finish_meta(&tmp, &names)?;
             }
             Ok(())
         })();

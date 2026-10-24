@@ -175,7 +175,7 @@ pub fn recover(part: &Path) -> Result<(PathBuf, f64)> {
         }
         w.write_end()?;
         drop(w);
-        mux::write_track_names(&tmp, &names)?;
+        mux::finish_meta(&tmp, &names)?;
         Ok(())
     })();
     drop(src);

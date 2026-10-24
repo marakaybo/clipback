@@ -2,6 +2,7 @@
 //! Запись идёт в ядре (`clipback-core`), здесь — управление им и интерфейс.
 
 mod clips;
+mod export;
 mod indicator;
 mod library;
 mod montage;
@@ -1203,6 +1204,7 @@ async fn trim_clip(
     audio_gains: Option<Vec<f32>>,
     quality: Option<String>,
 ) -> Res<clips::TrimOut> {
+    export::CANCEL.store(false, std::sync::atomic::Ordering::SeqCst);
     blocking(move || trim_clip_now(app, path, start, end, replace, audio_keep, audio_gains, quality)).await
 }
 
@@ -1220,18 +1222,13 @@ fn trim_clip_now(
     let p = checked_path(&app, &path)?;
     let q = quality.filter(|q| q != "original");
     storage::ensure_space(&app, storage::trim_expected_for(&p, start, end, q.as_deref()), "отрезок не сохранён")?;
-    let progress_app = app.clone();
-    let mut last = 0.0;
-    let mut progress = move |f: f64| {
-        // не чаще чем на 2 % — интерфейсу хватает
-        if f - last >= 0.02 || f >= 1.0 {
-            last = f;
-            let _ = progress_app.emit("export-progress", f);
+    let mut progress = export::progress(&app);
+    let mut r = clips::trim(&p, start, end, replace, audio_keep.as_deref(), audio_gains.as_deref(), q.as_deref(), &mut progress, &export::CANCEL).map_err(|e| {
+        let e = format!("{e:#}");
+        if e != "отменено" {
+            log(format!("не удалось сохранить отрезок: {e}"));
         }
-    };
-    let mut r = clips::trim(&p, start, end, replace, audio_keep.as_deref(), audio_gains.as_deref(), q.as_deref(), &mut progress).map_err(|e| {
-        log(format!("не удалось сохранить отрезок: {e:#}"));
-        format!("{e:#}")
+        e
     })?;
     inherit_hidden(&app, &p, &mut r.clip);
     log(format!(
@@ -1366,7 +1363,8 @@ async fn copy_image(png_base64: String) -> Res<()> {
 /// если клип никуда не бросили — оверлей возвращается.
 #[tauri::command]
 fn start_drag(app: AppHandle, window: tauri::Window, path: String, icon_png_base64: Option<String>) -> Res<()> {
-    let p = checked_path(&app, &path)?;
+    // клип или его копия с одной дорожкой (её заранее готовит `share_copy`)
+    let p = export::drag_path(&app, &path)?;
     let icon = icon_png_base64
         .and_then(|b| base64::engine::general_purpose::STANDARD.decode(b.as_bytes()).ok())
         .filter(|b| b.starts_with(&[0x89, b'P', b'N', b'G']))
@@ -1411,12 +1409,6 @@ const TRANSPARENT_PNG: &[u8] = &[
     0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00, 0x01,
     0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
 ];
-
-#[tauri::command]
-async fn copy_clip(app: AppHandle, path: String) -> Res<()> {
-    let p = checked_path(&app, &path)?;
-    winutil::copy_file_to_clipboard(&p).map_err(|e| format!("{e:#}"))
-}
 
 /// PNG кадра из плеера (интерфейс рисует кадр в canvas и присылает base64).
 #[tauri::command]
@@ -1814,6 +1806,7 @@ pub fn run() {
             power::start(&handle);
             storage::watch(handle.clone());
             recover_parts(handle.clone());
+            std::thread::spawn(|| export::clean_share(None));
             winutil::install_drag_cursors();
             build_tray(&handle)?;
             register_hotkeys(&handle);
@@ -1845,6 +1838,9 @@ pub fn run() {
             trim_clip,
             montage::montage_clip,
             montage::cancel_montage,
+            export::cancel_export,
+            export::one_track_clips,
+            export::share_copy,
             rename_clip,
             delete_clip,
             delete_clips,
@@ -1854,7 +1850,7 @@ pub fn run() {
             report::save_report,
             report::reveal_report,
             open_clips_folder,
-            copy_clip,
+            export::copy_clip,
             start_drag,
             copy_image,
             set_favorite,

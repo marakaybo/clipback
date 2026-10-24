@@ -5,11 +5,9 @@ use clipback_core::media::Quality;
 use clipback_core::{montage, mux};
 use serde::Serialize;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::{AppHandle, Emitter};
-
-/// «Отмена» в интерфейсе: сохранение проверяет флаг между кадрами.
-static CANCEL: AtomicBool = AtomicBool::new(false);
+use crate::export::CANCEL;
+use std::sync::atomic::Ordering;
+use tauri::AppHandle;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,7 +32,7 @@ pub async fn montage_clip(
 
 #[tauri::command]
 pub fn cancel_montage() {
-    CANCEL.store(true, Ordering::SeqCst);
+    crate::export::cancel_export();
 }
 
 fn run(app: AppHandle, path: String, pieces: Vec<(f64, f64)>, audio_keep: Option<Vec<usize>>, audio_gains: Option<Vec<f32>>, quality: Option<String>) -> Res<MontageOut> {
@@ -43,14 +41,7 @@ fn run(app: AppHandle, path: String, pieces: Vec<(f64, f64)>, audio_keep: Option
     let len: f64 = pieces.iter().map(|(s, e)| (e - s).max(0.0)).sum();
     storage::ensure_space(&app, storage::trim_expected_for(&p, 0.0, len, q.as_deref()), "монтаж не сохранён")?;
     let dst = montage::out_path(&p).map_err(|e| format!("{e:#}"))?;
-    let progress_app = app.clone();
-    let mut last = 0.0;
-    let mut progress = move |f: f64| {
-        if f - last >= 0.02 || f >= 1.0 {
-            last = f;
-            let _ = progress_app.emit("export-progress", f);
-        }
-    };
+    let mut progress = crate::export::progress(&app);
     let r = save(&p, &dst, &pieces, audio_keep.as_deref(), audio_gains.as_deref(), q.as_deref(), &mut progress).map_err(|e| {
         let e = format!("{e:#}");
         if e != "отменено" {

@@ -7,6 +7,7 @@ use crate::encoder::{Encoder, EncoderSettings, Packet};
 use crate::mux::{self, TrimResult};
 use anyhow::{bail, Context, Result};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use windows::core::{Interface, GUID, PCWSTR};
 use windows::Win32::Foundation::HMODULE;
@@ -166,12 +167,47 @@ fn unchanged(g: f32) -> bool {
     (g - 1.0).abs() < 1e-3
 }
 
+/// Флаг отмены, который никто не поднимает (для вызовов без кнопки «Отмена»).
+pub static NEVER: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn check(cancel: &AtomicBool) -> Result<()> {
+    if cancel.load(Ordering::Relaxed) {
+        bail!("отменено");
+    }
+    Ok(())
+}
+
+/// «Всё вместе», «Звук системы», «Микрофон» по номерам дорожек — если в файле есть все три.
+pub(crate) fn mix_sources(names: &[String]) -> Option<(usize, usize)> {
+    let sys = names.iter().position(|n| n == "Звук системы");
+    let mic = names.iter().position(|n| n == "Микрофон");
+    match (names.first().map(String::as_str), sys, mic) {
+        (Some(mux::MIX), Some(s), Some(m)) => Some((s, m)),
+        _ => None,
+    }
+}
+
+/// Надо ли сводить «Всё вместе» заново: громкость системы, микрофона или её самой менялась,
+/// или клип записан до выравнивания голоса (в нём голос мог тонуть в игре).
+pub(crate) fn remix_needed(src: &Path, names: &[String], gain: &dyn Fn(usize) -> f32) -> Option<(usize, usize)> {
+    let (s, m) = mix_sources(names)?;
+    (!(unchanged(gain(s)) && unchanged(gain(m)) && unchanged(gain(0))) || !mux::mix_leveled(src)).then_some((s, m))
+}
+
+/// Перекодируется ли звук отрезка (иначе кадры AAC копируются как есть).
+pub fn audio_rework(src: &Path, keep: Option<&[usize]>, gains: Option<&[f32]>) -> bool {
+    let n = mux::clip_info(src).map(|i| i.audio_names).unwrap_or_default();
+    let gain = |i: usize| gains.and_then(|g| g.get(i)).copied().unwrap_or(1.0);
+    let idx: Vec<usize> = keep.map_or_else(|| (0..n.len()).collect(), |k| k.to_vec());
+    idx.iter().any(|&i| !unchanged(gain(i))) || (idx.contains(&0) && remix_needed(src, &n, &gain).is_some())
+}
+
 /// Звук отрезка [start; end) секунд: кадры AAC дорожек `keep` (None — всех) и их названия,
 /// позиции — в отсчётах 48 кГц от `start`.
 /// `gains` — громкость каждой дорожки файла по номеру (1 — как есть, 0 — тишина, до 4).
-/// Пока все громкости 1, кадры копируются без перекодирования. Иначе изменённые дорожки
-/// раскодируются, умножаются и кодируются заново, а «Всё вместе» сводится заново из «Звука
-/// системы» и «Микрофона» с их громкостями — так же, как при записи (`mixer::render_track`).
+/// Дорожки с прежней громкостью копируются без перекодирования. Изменённые раскодируются,
+/// умножаются и кодируются заново, а «Всё вместе» сводится заново из «Звука системы» и
+/// «Микрофона» — с выравниванием голоса, как при записи (`voicemix`).
 pub fn audio_segment(
     src: &Path,
     start: f64,
@@ -179,83 +215,116 @@ pub fn audio_segment(
     keep: Option<&[usize]>,
     gains: Option<&[f32]>,
 ) -> Result<(Vec<Vec<Arc<AudioPacket>>>, Vec<String>)> {
-    let Some(gains) = gains.filter(|g| g.iter().any(|&x| !unchanged(x))) else {
+    audio_segment_with(src, start, end, keep, gains, &mut |_| {}, &NEVER)
+}
+
+/// То же, с ходом работы 0…1 и отменой.
+pub fn audio_segment_with(
+    src: &Path,
+    start: f64,
+    end: f64,
+    keep: Option<&[usize]>,
+    gains: Option<&[f32]>,
+    progress: &mut dyn FnMut(f64),
+    cancel: &AtomicBool,
+) -> Result<(Vec<Vec<Arc<AudioPacket>>>, Vec<String>)> {
+    if !audio_rework(src, keep, gains) {
         return mux::read_audio_segment(src, start, end, keep);
-    };
+    }
     let (all, names) = mux::read_audio_segment(src, start, end, None)?;
-    let gain = |i: usize| gains.get(i).copied().unwrap_or(1.0).clamp(0.0, 4.0);
+    let gain = |i: usize| gains.and_then(|g| g.get(i)).copied().unwrap_or(1.0).clamp(0.0, 4.0);
     let idx: Vec<usize> = match keep {
         Some(k) => k.iter().copied().filter(|&i| i < all.len()).collect(),
         None => (0..all.len()).collect(),
     };
-    let sys = names.iter().position(|n| n == "Звук системы");
-    let mic = names.iter().position(|n| n == "Микрофон");
-    let mix_sources = match (names.first().map(String::as_str), sys, mic) {
-        (Some("Всё вместе"), Some(s), Some(m)) => Some((s, m)),
-        _ => None,
-    };
+    let remix = idx.contains(&0).then(|| remix_needed(src, &names, &gain)).flatten();
+    // работа: раскодировать и закодировать каждую изменённую дорожку (сведение — за три)
+    let jobs: Vec<usize> = idx.iter().copied().filter(|&i| (i == 0 && remix.is_some()) || !unchanged(gain(i))).collect();
+    let units = jobs.iter().map(|&i| if i == 0 && remix.is_some() { 3.0 } else { 2.0 }).sum::<f64>().max(1.0);
+    let done = std::cell::Cell::new(0.0);
+    let mut step = |f: f64, w: f64| progress(((done.get() + f * w) / units).min(1.0));
 
     let _mf = MfScope::new()?;
     let mut tracks = Vec::new();
     let mut out_names = Vec::new();
     for i in idx {
+        check(cancel)?;
         let packets = &all[i];
-        let new = match mix_sources {
+        let new = match remix {
             Some((s, m)) if i == 0 => {
-                if unchanged(gain(s)) && unchanged(gain(m)) && unchanged(gain(0)) {
-                    None
-                } else {
-                    let (sp, sv) = decode_track(&all[s])?;
-                    let (mp, mv) = decode_track(&all[m])?;
-                    let from = sp.min(mp);
-                    let len = ((sp + sv.len() as i64 / 2).max(mp + mv.len() as i64 / 2) - from).max(0) as usize;
-                    let mut mix = vec![0f32; len * 2];
-                    for (p0, v, g) in [(sp, &sv, gain(s)), (mp, &mv, gain(m))] {
-                        let off = (p0 - from) as usize * 2;
-                        for (k, x) in v.iter().enumerate() {
-                            mix[off + k] += x * g;
-                        }
-                    }
-                    let g0 = gain(0);
+                let (sp, sv) = decode_track_with(&all[s], &mut |f| step(f, 1.0), cancel)?;
+                done.set(done.get() + 1.0);
+                let (mp, mv) = decode_track_with(&all[m], &mut |f| step(f, 1.0), cancel)?;
+                done.set(done.get() + 1.0);
+                let from = sp.min(mp);
+                let len = ((sp + sv.len() as i64 / 2).max(mp + mv.len() as i64 / 2) - from).max(0) as usize;
+                let place = |p0: i64, v: &[f32]| {
+                    let mut b = vec![0f32; len * 2];
+                    let off = (p0 - from) as usize * 2;
+                    b[off..off + v.len()].copy_from_slice(v);
+                    b
+                };
+                let (a, b) = (place(sp, &sv), place(mp, &mv));
+                let mut mix = crate::voicemix::VoiceMix::primed(&a, &b).process(&a, &b, gain(s), gain(m));
+                let g0 = gain(0);
+                if !unchanged(g0) {
                     mix.iter_mut().for_each(|x| *x = crate::mixer::soft_clip(*x * g0));
-                    Some(encode_track(from, &mix)?)
                 }
+                let r = encode_track_with(from, &mix, &mut |f| step(f, 1.0), cancel)?;
+                done.set(done.get() + 1.0);
+                Some(r)
             }
             _ if unchanged(gain(i)) => None,
             _ => {
-                let (p0, mut v) = decode_track(packets)?;
+                let (p0, mut v) = decode_track_with(packets, &mut |f| step(f, 1.0), cancel)?;
+                done.set(done.get() + 1.0);
                 let g = gain(i);
                 // громче исходного — мягкое ограничение, как при записи
                 v.iter_mut().for_each(|x| *x = if g > 1.0 { crate::mixer::soft_clip(*x * g) } else { *x * g });
-                Some(encode_track(p0, &v)?)
+                let r = encode_track_with(p0, &v, &mut |f| step(f, 1.0), cancel)?;
+                done.set(done.get() + 1.0);
+                Some(r)
             }
         };
         tracks.push(new.unwrap_or_else(|| packets.clone()));
         out_names.push(names.get(i).cloned().unwrap_or_default());
     }
+    progress(1.0);
     Ok((tracks, out_names))
 }
 
 /// Раскодировать дорожку: позиция первого отсчёта и звук подряд (стерео −1…1).
 pub(crate) fn decode_track(packets: &[Arc<AudioPacket>]) -> Result<(i64, Vec<f32>)> {
+    decode_track_with(packets, &mut |_| {}, &NEVER)
+}
+
+fn decode_track_with(packets: &[Arc<AudioPacket>], progress: &mut dyn FnMut(f64), cancel: &AtomicBool) -> Result<(i64, Vec<f32>)> {
     let first = packets.first().map_or(0, |p| p.pos);
     let mut dec = unsafe { AacDecoder::new()? };
     let mut out = Vec::with_capacity(packets.len() * crate::aac::FRAME as usize * 2);
-    for p in packets {
+    for (k, p) in packets.iter().enumerate() {
+        if k % 500 == 0 {
+            check(cancel)?;
+            progress(k as f64 / packets.len() as f64);
+        }
         unsafe { dec.decode_pcm(&p.data, &mut out)? };
     }
     Ok((first + DECODE_DELAY, out))
 }
 
 /// Закодировать звук обратно в кадры AAC с позициями от `pos`.
-fn encode_track(pos: i64, samples: &[f32]) -> Result<Vec<Arc<AudioPacket>>> {
+fn encode_track_with(pos: i64, samples: &[f32], progress: &mut dyn FnMut(f64), cancel: &AtomicBool) -> Result<Vec<Arc<AudioPacket>>> {
     let mut enc = crate::aac::AacEncoder::new()?;
     let mut out = Vec::new();
     // кусками по секунде; в конце — немного тишины, иначе кодировщик придержит последние кадры
     // (лишнее за концом видео отрежет сборка файла)
     let step = crate::audio::RATE as usize * 2;
     let mut p = pos;
-    for chunk in samples.chunks(step) {
+    for (k, chunk) in samples.chunks(step).enumerate() {
+        if k % 10 == 0 {
+            check(cancel)?;
+            progress(k as f64 * step as f64 / samples.len().max(1) as f64);
+        }
         enc.encode(p, chunk, &mut out)?;
         p += chunk.len() as i64 / 2;
     }
@@ -353,6 +422,9 @@ pub(crate) fn device() -> Result<(ID3D11Device, ID3D11DeviceContext)> {
     }
 }
 
+/// Доля видео в ходе перекодирования (остальное — звук и сборка файла).
+const VIDEO_SHARE: f64 = 0.85;
+
 /// Сохранить отрезок [start; end) в другом качестве: видео перекодируется на видеокарте
 /// (начало — точно по кадру), звук копируется без изменений, если громкость дорожек не менялась.
 #[allow(clippy::too_many_arguments)]
@@ -365,6 +437,7 @@ pub fn transcode(
     audio_gains: Option<&[f32]>,
     q: &Quality,
     progress: &mut dyn FnMut(f64),
+    cancel: &AtomicBool,
 ) -> Result<TrimResult> {
     if end <= start {
         bail!("конец отрезка раньше начала");
@@ -439,6 +512,7 @@ pub fn transcode(
             if ts >= end_ts {
                 break;
             }
+            check(cancel)?;
             let buf = sample.GetBufferByIndex(0)?;
             let dxgi: IMFDXGIBuffer = buf.cast().context("декодер работает не на видеокарте")?;
             let mut raw = std::ptr::null_mut();
@@ -453,7 +527,7 @@ pub fn transcode(
             enc.push_at(target, ts - base, frame_dur)?;
             pi = (pi + 1) % pool.len();
             last = ts + frame_dur;
-            progress(((ts - start_ts) as f64 / (end_ts - start_ts).max(1) as f64).clamp(0.0, 0.99));
+            progress(((ts - start_ts) as f64 / (end_ts - start_ts).max(1) as f64).clamp(0.0, 1.0) * VIDEO_SHARE);
         }
         enc.finish(&mut sink)?;
         drop(reader);
@@ -465,7 +539,8 @@ pub fn transcode(
     }
 
     // звук: те же кадры AAC из исходника, сдвинутые к началу отрезка (или с другой громкостью)
-    let (tracks, names) = audio_segment(src, first_ts as f64 / 1e7, last_end as f64 / 1e7, audio_keep, audio_gains)?;
+    let (tracks, names) =
+        audio_segment_with(src, first_ts as f64 / 1e7, last_end as f64 / 1e7, audio_keep, audio_gains, &mut |f| progress(VIDEO_SHARE + f * (0.99 - VIDEO_SHARE)), cancel)?;
     let silence = if tracks.is_empty() { Vec::new() } else { crate::aac::silent_frame()? };
     let inputs: Vec<mux::AudioInput> = tracks.iter().map(|t| mux::AudioInput { packets: t, silence: &silence }).collect();
     mux::write_av_named(dst, &packets, &inputs, &names, out_w, out_h)?;

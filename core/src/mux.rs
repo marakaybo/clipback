@@ -11,6 +11,7 @@ use mp4::{
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 pub(crate) const TIMESCALE: u64 = 90_000;
@@ -223,7 +224,7 @@ pub fn write_av_named(path: &Path, packets: &[Arc<Packet>], audio: &[AudioInput]
         w.write_end()?;
         drop(w);
         if names.len() == tracks.len() {
-            write_track_names(&tmp, names)?;
+            finish_meta(&tmp, names)?;
         }
         Ok(())
     })();
@@ -273,6 +274,12 @@ pub fn write_track_names(path: &Path, names: &[String]) -> Result<()> {
 
 /// Прочитать названия дорожек (если файл записан Clipback).
 pub fn read_track_names(path: &Path) -> Option<Vec<String>> {
+    let body = find_free(path, NAMES_TAG)?;
+    Some(String::from_utf8_lossy(&body).split('\n').map(str::to_string).collect())
+}
+
+/// Тело служебного блока «free», который начинается с `tag` (без самого тега).
+fn find_free(path: &Path, tag: &[u8]) -> Option<Vec<u8>> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = File::open(path).ok()?;
     let len = f.metadata().ok()?.len();
@@ -294,16 +301,168 @@ pub fn read_track_names(path: &Path) -> Option<Vec<String>> {
         if size < header {
             return None;
         }
-        if &h[4..8] == b"free" && size - header >= NAMES_TAG.len() as u64 && size < 64 * 1024 {
+        if &h[4..8] == b"free" && size - header >= tag.len() as u64 && size < 64 * 1024 {
             let mut body = vec![0u8; (size - header) as usize];
             f.read_exact(&mut body).ok()?;
-            if let Some(rest) = body.strip_prefix(NAMES_TAG) {
-                return Some(String::from_utf8_lossy(rest).split('\n').map(str::to_string).collect());
+            if let Some(rest) = body.strip_prefix(tag) {
+                return Some(rest.to_vec());
             }
         }
         pos += size;
     }
     None
+}
+
+/// Метка «„Всё вместе“ сведена с выравниванием голоса» (Clipback 0.5.6+). В старых клипах
+/// голос в ней мог тонуть или глушить игру — такую дорожку при сохранении сводим заново.
+const MIX_TAG: &[u8] = b"clipback-mix\nvoice\n";
+
+pub const MIX: &str = "Всё вместе";
+
+/// Свели ли «Всё вместе» с выравниванием голоса.
+pub fn mix_leveled(path: &Path) -> bool {
+    find_free(path, MIX_TAG).is_some()
+}
+
+/// Дописать в только что собранный файл всё про звуковые дорожки: названия (для плееров —
+/// в заголовках дорожек, для Clipback — в блоке «free»), «по умолчанию» — только первая,
+/// и метку выровненного «Всё вместе». Вызывать сразу после `write_end`, пока moov в конце файла.
+pub fn finish_meta(path: &Path, names: &[String]) -> Result<()> {
+    use std::io::Write;
+    label_tracks(path, names)?;
+    write_track_names(path, names)?;
+    if names.first().is_some_and(|n| n == MIX) {
+        let mut f = std::fs::OpenOptions::new().append(true).open(path)?;
+        f.write_all(&((MIX_TAG.len() + 8) as u32).to_be_bytes())?;
+        f.write_all(b"free")?;
+        f.write_all(MIX_TAG)?;
+    }
+    Ok(())
+}
+
+// ---------- заголовки звуковых дорожек ----------
+// Плееры, Discord и мессенджеры играют одну звуковую дорожку. Раньше все были «по умолчанию»
+// и без названий — кто-то брал не ту. Теперь включена только первая («Всё вместе»), все
+// звуковые — в одной группе «одна из» (alternate group), у каждой название в hdlr
+// (ffprobe: handler_name) и в udta/©nam (title).
+
+/// Дочерние блоки: (тип, блок целиком).
+fn children(b: &[u8]) -> Result<Vec<(&[u8], &[u8])>> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    while pos + 8 <= b.len() {
+        let size = u32::from_be_bytes(b[pos..pos + 4].try_into()?) as usize;
+        if size < 8 || pos + size > b.len() {
+            bail!("moov повреждён");
+        }
+        out.push((&b[pos + 4..pos + 8], &b[pos..pos + size]));
+        pos += size;
+    }
+    Ok(out)
+}
+
+fn wrap(kind: &[u8], body: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(body.len() + 8);
+    v.extend_from_slice(&((body.len() + 8) as u32).to_be_bytes());
+    v.extend_from_slice(kind);
+    v.extend_from_slice(body);
+    v
+}
+
+/// Тело вложенного блока по пути типов.
+fn nested<'a>(b: &'a [u8], path: &[&[u8]]) -> Option<&'a [u8]> {
+    let (first, rest) = path.split_first()?;
+    let (_, bx) = children(b).ok()?.into_iter().find(|(k, _)| k == first)?;
+    if rest.is_empty() {
+        Some(&bx[8..])
+    } else {
+        nested(&bx[8..], rest)
+    }
+}
+
+fn relabel_moov(moov_body: &[u8], names: &[String]) -> Result<Vec<u8>> {
+    let mut body = Vec::with_capacity(moov_body.len() + 256);
+    let mut k = 0;
+    for (kind, bx) in children(moov_body)? {
+        let audio = kind == b"trak" && nested(&bx[8..], &[b"mdia", b"hdlr"]).is_some_and(|h| h.len() >= 12 && &h[8..12] == b"soun");
+        if audio {
+            body.extend(relabel_trak(&bx[8..], k == 0, names.get(k).map(String::as_str))?);
+            k += 1;
+        } else {
+            body.extend_from_slice(bx);
+        }
+    }
+    Ok(wrap(b"moov", &body))
+}
+
+fn relabel_trak(trak: &[u8], first: bool, name: Option<&str>) -> Result<Vec<u8>> {
+    let mut body = Vec::with_capacity(trak.len() + 64);
+    for (kind, bx) in children(trak)? {
+        match kind {
+            b"tkhd" if bx.len() >= 8 + 4 + 20 + 12 => {
+                let mut t = bx.to_vec();
+                // флаги: 1 — включена (её плееры играют сами), 2 — часть фильма
+                t[11] = if first { 3 } else { 2 };
+                let times = if t[8] == 1 { 32 } else { 20 };
+                let alt = 8 + 4 + times + 8 + 2;
+                if t.len() >= alt + 2 {
+                    t[alt..alt + 2].copy_from_slice(&1u16.to_be_bytes());
+                }
+                body.extend(t);
+            }
+            b"mdia" if name.is_some() => {
+                let mut m = Vec::new();
+                for (k2, b2) in children(&bx[8..])? {
+                    if k2 == b"hdlr" && b2.len() >= 8 + 24 {
+                        let mut h = b2[8..8 + 24].to_vec();
+                        h.extend_from_slice(name.unwrap_or_default().as_bytes());
+                        h.push(0);
+                        m.extend(wrap(b"hdlr", &h));
+                    } else {
+                        m.extend_from_slice(b2);
+                    }
+                }
+                body.extend(wrap(b"mdia", &m));
+            }
+            b"udta" if name.is_some() => {}
+            _ => body.extend_from_slice(bx),
+        }
+    }
+    if let Some(n) = name {
+        // строка QuickTime: длина, язык «und» (упакованный ISO 639 — значит UTF-8), текст
+        let mut t = (n.len() as u16).to_be_bytes().to_vec();
+        t.extend_from_slice(&0x55c4u16.to_be_bytes());
+        t.extend_from_slice(n.as_bytes());
+        body.extend(wrap(b"udta", &wrap(b"\xa9nam", &t)));
+    }
+    Ok(wrap(b"trak", &body))
+}
+
+/// Переписать заголовки звуковых дорожек (см. выше). moov должен лежать после данных —
+/// так пишет `Mp4Writer`: его размер меняется, а ссылки на данные остаются прежними.
+pub fn label_tracks(path: &Path, names: &[String]) -> Result<()> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let mut f = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
+    let boxes = crate::montage::top_boxes(&mut f)?;
+    let Some(&(_, at, size)) = boxes.iter().find(|b| &b.0 == b"moov") else { bail!("в MP4 нет moov") };
+    if boxes.iter().any(|b| &b.0 == b"mdat" && b.1 > at) {
+        return Ok(()); // moov впереди данных — не трогаем (сдвинулись бы ссылки)
+    }
+    let len = f.metadata()?.len();
+    let mut moov = vec![0u8; size as usize];
+    f.seek(SeekFrom::Start(at))?;
+    f.read_exact(&mut moov)?;
+    let mut tail = Vec::new();
+    f.read_to_end(&mut tail)?;
+    if moov.len() < 8 || at + size + tail.len() as u64 != len {
+        bail!("MP4 повреждён");
+    }
+    let new = relabel_moov(&moov[8..], names)?;
+    f.seek(SeekFrom::Start(at))?;
+    f.write_all(&new)?;
+    f.write_all(&tail)?;
+    f.set_len(at + new.len() as u64 + tail.len() as u64)?;
+    Ok(())
 }
 
 /// Названия для файлов без записанных названий (ранние версии Clipback и чужие файлы).
@@ -393,6 +552,21 @@ struct AudioCut {
 /// То же, но оставить только звуковые дорожки с номерами `audio_keep` (с нуля, в порядке файла).
 /// Начало сдвигается назад к ближайшему ключевому кадру (не больше чем на секунду).
 pub fn trim_tracks(src: &Path, dst: &Path, start: f64, end: f64, audio_keep: Option<&[usize]>, audio_gains: Option<&[f32]>) -> Result<TrimResult> {
+    trim_tracks_with(src, dst, start, end, audio_keep, audio_gains, &mut |_| {}, &crate::media::NEVER)
+}
+
+/// То же, с ходом работы 0…1 и отменой.
+#[allow(clippy::too_many_arguments)]
+pub fn trim_tracks_with(
+    src: &Path,
+    dst: &Path,
+    start: f64,
+    end: f64,
+    audio_keep: Option<&[usize]>,
+    audio_gains: Option<&[f32]>,
+    progress: &mut dyn FnMut(f64),
+    cancel: &AtomicBool,
+) -> Result<TrimResult> {
     if end <= start {
         bail!("конец отрезка раньше начала");
     }
@@ -444,8 +618,10 @@ pub fn trim_tracks(src: &Path, dst: &Path, start: f64, end: f64, audio_keep: Opt
     let mut audio = Vec::new();
     // громкость дорожек менялась: звук перекодируется, видео по-прежнему копируется как есть
     let mut regained: Vec<Vec<(i64, Bytes)>> = Vec::new();
-    if audio_gains.is_some_and(|g| g.iter().any(|&x| (x - 1.0).abs() >= 1e-3)) {
-        let (tracks, names) = crate::media::audio_segment(src, v_start, v_end, audio_keep, audio_gains)?;
+    // доля звука в ходе работы: перекодирование звука дольше копирования кадров
+    let audio_share = if crate::media::audio_rework(src, audio_keep, audio_gains) { 0.6 } else { 0.0 };
+    if audio_share > 0.0 {
+        let (tracks, names) = crate::media::audio_segment_with(src, v_start, v_end, audio_keep, audio_gains, &mut |f| progress(f * audio_share), cancel)?;
         let silence = crate::aac::silent_frame()?;
         let end_samples = ((v_end - v_start) * crate::audio::RATE as f64).round() as i64;
         regained = tracks.iter().map(|t| layout_audio(&AudioInput { packets: t, silence: &silence }, 0, end_samples)).collect();
@@ -484,6 +660,10 @@ pub fn trim_tracks(src: &Path, dst: &Path, start: f64, end: f64, audio_keep: Opt
         let base = times[first as usize - 1];
         let mut next: Vec<u32> = audio.iter().map(|a| a.first).collect();
         for i in first..=last {
+            if (i - first) % 60 == 0 {
+                crate::media::check(cancel)?;
+                progress(audio_share + (1.0 - audio_share) * (i - first) as f64 / (last - first + 1) as f64);
+            }
             let s = r.read_sample(id, i)?.context("кадр не читается")?;
             let vt = (s.start_time - base) as f64 / tsf;
             // перемежаем: звук, который начинается не позже этого кадра
@@ -522,13 +702,35 @@ pub fn trim_tracks(src: &Path, dst: &Path, start: f64, end: f64, audio_keep: Opt
         }
         wr.write_end()?;
         drop(wr);
-        write_track_names(&tmp, &kept_names)?;
+        finish_meta(&tmp, &kept_names)?;
         Ok(())
     })();
     // исходник надо закрыть до замены: при «заменить оригинал» dst == src
     drop(r);
     finish(&tmp, dst, res)?;
+    progress(1.0);
     Ok(TrimResult { start: v_start, end: v_end })
+}
+
+/// Копия клипа с одной звуковой дорожкой — для отправки: плееры, Discord и мессенджеры
+/// играют только первую. Видео копируется как есть, звук — «Всё вместе» с громкостью
+/// `gains` (сводится заново, если громкость менялась или клип записан до выравнивания голоса),
+/// оглавление файла — в начале (видео начинает играть, не дожидаясь загрузки до конца).
+pub fn one_track(src: &Path, dst: &Path, gains: Option<&[f32]>, progress: &mut dyn FnMut(f64), cancel: &AtomicBool) -> Result<()> {
+    let info = clip_info(src)?;
+    let keep: Vec<usize> = (info.audio_tracks > 0).then_some(0).into_iter().collect();
+    let part = dst.with_extension("1t.mp4");
+    let fast = dst.with_extension("fs.part");
+    let r = (|| {
+        trim_tracks_with(src, &part, 0.0, info.duration + 1.0, Some(&keep), gains, &mut |f| progress(f * 0.9), cancel)?;
+        crate::media::check(cancel)?;
+        crate::montage::faststart(&part, &fast)?;
+        Ok(())
+    })();
+    let _ = std::fs::remove_file(&part);
+    finish(&fast, dst, r)?;
+    progress(1.0);
+    Ok(())
 }
 
 /// Кадры AAC звуковых дорожек на отрезке [start; end) секунд и их названия.
