@@ -134,6 +134,19 @@ struct Watch {
     toasted: Option<Instant>,
 }
 
+// Keep archive I/O off the recorder-event thread and outside the app state mutex.
+static FREE: Mutex<Option<(PathBuf, Option<u64>)>> = Mutex::new(None);
+
+pub fn cached_free(dir: &Path) -> Option<u64> {
+    let cache = FREE.lock().unwrap_or_else(|e| e.into_inner());
+    cache.as_ref().filter(|(p, _)| p == dir).and_then(|(_, n)| *n)
+}
+
+fn refresh_free(dir: &Path) {
+    let bytes = winutil::free_space(dir);
+    *FREE.lock().unwrap_or_else(|e| e.into_inner()) = Some((dir.to_owned(), bytes));
+}
+
 static WATCH: Mutex<Option<Watch>> = Mutex::new(None);
 /// Полноценную запись остановили из-за места — сказать об этом, когда файл допишется.
 static LOW_STOP: AtomicBool = AtomicBool::new(false);
@@ -144,8 +157,14 @@ fn watch_lock() -> std::sync::MutexGuard<'static, Option<Watch>> {
 }
 
 /// Текст плашки, если с папкой беда (для состояния, которое видит интерфейс).
-pub fn problem_text() -> Option<String> {
-    watch_lock().as_ref().and_then(|w| banner_text(w.state, &w.dir))
+pub fn problem_text(staged: bool) -> Option<String> {
+    watch_lock().as_ref().and_then(|w| {
+        if staged && w.state != FolderState::Ok {
+            Some("Папка клипов недоступна. Повторы остаются во временной папке до переноса.".into())
+        } else {
+            banner_text(w.state, &w.dir)
+        }
+    })
 }
 
 fn out_dir(app: &AppHandle) -> PathBuf {
@@ -182,7 +201,12 @@ pub fn recheck(app: &AppHandle) -> FolderState {
     }
     if toast {
         if let Some(r) = folder_reason(state, &dir) {
-            show_toast(app, &r, "Клипы не сохранятся — выберите папку в Clipback", "error");
+            let detail = if lock(app).settings.fast_replay {
+                "Повторы останутся во временной папке до переноса"
+            } else {
+                "Клипы не сохранятся — выберите папку в Clipback"
+            };
+            show_toast(app, &r, detail, "error");
         }
     }
     state
@@ -194,10 +218,12 @@ pub fn watch(app: AppHandle) {
     std::thread::Builder::new()
         .name("clipback-storage".into())
         .spawn(move || {
+            refresh_free(&out_dir(&app));
             recheck(&app);
             loop {
                 std::thread::sleep(Duration::from_secs(5));
                 let dir = out_dir(&app);
+                refresh_free(&dir);
                 let ok = watch_lock().as_ref().is_some_and(|w| w.state == FolderState::Ok && w.dir == dir);
                 if !ok || !dir.is_dir() {
                     recheck(&app);

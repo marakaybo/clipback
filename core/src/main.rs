@@ -149,7 +149,7 @@ fn real_main() -> Result<()> {
                 let s = buffered_secs as u64 % 60;
                 println!("  буфер {m}:{s:02} · {} в памяти · {fps:.0} к/с · пропущено {dropped}", mb(buffer_bytes as u64));
             }
-            Event::Saved { path, seconds, bytes } => {
+            Event::Saved { path, seconds, bytes, .. } => {
                 println!("✔ Сохранено {:.1} с, {}: {}", seconds, mb(bytes), path.display());
                 if args.save_after.is_some() {
                     break;

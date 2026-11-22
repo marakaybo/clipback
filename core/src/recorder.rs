@@ -56,6 +56,8 @@ pub enum Command {
     /// `label` — начало имени файла (обычно название игры).
     /// `dir` — куда сохранить (None — папка клипов из настроек).
     Save { seconds: Option<u32>, label: Option<String>, dir: Option<PathBuf> },
+    /// Snapshot now. Resolve the staging directory on the save worker.
+    StageReplay { label: Option<String>, prepare: Box<dyn FnOnce() -> anyhow::Result<PathBuf> + Send> },
     SetBufferLength(u32),
     /// PNG текущего кадра экрана.
     Screenshot { reply: Sender<Result<crate::shot::RawImage, String>> },
@@ -73,7 +75,7 @@ pub enum Event {
     #[serde(rename_all = "camelCase")]
     Status { buffered_secs: f64, buffer_bytes: usize, fps: f64, dropped: u64 },
     #[serde(rename_all = "camelCase")]
-    Saved { path: PathBuf, seconds: f64, bytes: u64 },
+    Saved { path: PathBuf, seconds: f64, bytes: u64, staged: bool },
     SaveFailed { message: String },
     RecordStarted { path: PathBuf },
     #[serde(rename_all = "camelCase")]
@@ -312,20 +314,35 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
                     };
                     let _ = reply.send(r);
                 }
-                Command::Save { seconds, label, dir } => {
+                save @ (Command::Save { .. } | Command::StageReplay { .. }) => {
+                    let (seconds, label, dir, prepare) = match save {
+                        Command::Save { seconds, label, dir } => (seconds, label, dir, None),
+                        Command::StageReplay { label, prepare } => (None, label, None, Some(prepare)),
+                        _ => unreachable!(),
+                    };
                     let snap = ring.snapshot_all(seconds);
                     let silence = silence.clone();
                     let names = track_list.clone();
                     let base = format!("{} {}", label.as_deref().unwrap_or("Clipback"), crate::util::file_stamp());
                     let dir = dir.unwrap_or_else(|| cfg.out_dir.clone());
-                    let _ = std::fs::create_dir_all(&dir);
-                    let path = crate::util::unique_path(&dir, &base, "mp4");
                     let frame_secs = 1.0 / fps as f64;
                     let ev = events.clone();
                     // запись идёт в отдельном потоке — захват не прерывается; при остановке
                     // (выход из программы) поток дожидаемся, иначе клип остался бы `.part`
                     finishing.0.retain(|t| !t.is_finished());
                     let t = std::thread::spawn(move || {
+                        let staged = prepare.is_some();
+                        let dir = match prepare {
+                            Some(prepare) => match prepare() {
+                                Ok(dir) => dir,
+                                Err(e) => {
+                                    let _ = ev.send(Event::SaveFailed { message: format!("{e:#}") });
+                                    return;
+                                }
+                            },
+                            None => dir,
+                        };
+                        let path = crate::util::unique_path(&dir, &base, "mp4");
                         let packets = &snap.video;
                         let inputs: Vec<crate::mux::AudioInput> =
                             snap.audio.iter().map(|a| crate::mux::AudioInput { packets: a, silence: &silence }).collect();
@@ -346,7 +363,7 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
                         let _ = match r {
                             Ok(()) => {
                                 let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                                ev.send(Event::Saved { path, seconds: secs, bytes })
+                                ev.send(Event::Saved { path, seconds: secs, bytes, staged })
                             }
                             Err(e) => ev.send(Event::SaveFailed { message: format!("{e:#}") }),
                         };

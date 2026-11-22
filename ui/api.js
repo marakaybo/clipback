@@ -74,6 +74,7 @@
 
   const settings = {
     bufferMinutes: 5, fps: 60, quality: "medium", maxHeight: null, monitor: 0,
+    fastReplay: false, replayStageDir: "C:\\Users\\you\\AppData\\Local\\io.github.clipback\\replay-stage",
     outDir: "C:\\Users\\you\\Videos\\Clipback",
     hotkeyOverlay: "Alt+Z", hotkeySave: "Alt+F10", hotkeyScreenshot: "Alt+F1", hotkeyRecord: "Alt+F9",
     systemAudio: true, mic: true, micDevice: null, micGain: 1, audioMode: "advanced", customBitrate: 12,

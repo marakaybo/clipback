@@ -9,6 +9,9 @@ mod montage;
 mod nvidia;
 mod power;
 mod report;
+mod replay_stage;
+#[cfg(test)]
+mod replay_stage_bench;
 mod settings;
 mod sound;
 mod storage;
@@ -157,8 +160,8 @@ fn dto(i: &Inner) -> StateDto {
         last_game: i.last_game.clone(),
         hotkey_errors: i.hotkey_errors.clone(),
         record_started: i.record_started,
-        disk_free: winutil::free_space(&i.settings.out_dir),
-        folder_problem: storage::problem_text(),
+        disk_free: storage::cached_free(&i.settings.out_dir),
+        folder_problem: storage::problem_text(i.settings.fast_replay),
         mem_total: storage::ram_total(),
         settings: i.settings.clone(),
         version: env!("CARGO_PKG_VERSION"),
@@ -460,8 +463,14 @@ fn forward_events(app: AppHandle, events: mpsc::Receiver<Event>, generation: u64
                 emit_status(&app);
                 storage::on_status(&app);
             }
-            Event::Saved { path, seconds, bytes } => {
+            Event::Saved { path, seconds, bytes, staged } => {
                 log(format!("сохранён повтор {:.1} с, {} байт: {}", seconds, bytes, path.display()));
+                if staged {
+                    cue(&app, sound::Cue::Saved);
+                    show_toast(&app, "Повтор сохранён", "Перенос в папку клипов — в фоне", "replay");
+                    replay_stage::wake();
+                    continue;
+                }
                 clips_changed(&app);
                 let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
                 let _ = app.emit("clip-saved", path.to_string_lossy().to_string());
@@ -640,22 +649,34 @@ fn current_game_label(app: &AppHandle) -> Option<String> {
 
 fn save_replay(app: &AppHandle) {
     let label = current_game_label(app);
-    if lock(app).recorder.is_some() {
-        if let Some(r) = storage::save_blocked(app, storage::replay_expected(app)) {
+    let (tx, settings) = {
+        let i = lock(app);
+        (i.recorder.as_ref().map(Recorder::sender), i.settings.clone())
+    };
+    let Some(tx) = tx else {
+        show_toast(app, "Запись выключена", "Включите запись буфера в Clipback", "error");
+        return;
+    };
+    let dest = util::clip_dir(&settings.out_dir, label.as_deref(), settings.game_folders);
+    let expected = storage::replay_expected(app);
+    let command = if settings.fast_replay {
+        let stage = settings.replay_stage_dir;
+        Command::StageReplay { label, prepare: Box::new(move || {
+            std::fs::create_dir_all(&stage)?;
+            if !storage::enough_space(winutil::free_space(&stage), expected) {
+                anyhow::bail!("Мало места во временной папке {}", stage.display());
+            }
+            replay_stage::prepare(&stage, &dest)
+        }) }
+    } else {
+        if let Some(r) = storage::save_blocked(app, expected) {
             show_toast(app, &r, "Клип не сохранён — повтор пока в памяти", "error");
             return;
         }
-    }
-    let i = lock(app);
-    match &i.recorder {
-        Some(r) => {
-            let dir = Some(util::clip_dir(&i.settings.out_dir, label.as_deref(), i.settings.game_folders));
-            let _ = r.sender().send(Command::Save { seconds: None, label, dir });
-        }
-        None => {
-            drop(i);
-            show_toast(app, "Запись выключена", "Включите запись буфера в Clipback", "error");
-        }
+        Command::Save { seconds: None, label, dir: Some(dest) }
+    };
+    if tx.send(command).is_err() {
+        show_toast(app, "Не удалось сохранить повтор", "Запись буфера уже остановлена", "error");
     }
 }
 
@@ -1325,8 +1346,8 @@ fn leave_overlay_for_explorer(app: &AppHandle, window: &tauri::Window) {
 }
 
 #[tauri::command]
-fn open_clips_folder(app: AppHandle, window: tauri::Window) -> Res<()> {
-    let dir = out_dir(&app);
+fn open_clips_folder(app: AppHandle, window: tauri::Window, staging: Option<bool>) -> Res<()> {
+    let dir = if staging == Some(true) { lock(&app).settings.replay_stage_dir.clone() } else { out_dir(&app) };
     leave_overlay_for_explorer(&app, &window);
     std::fs::create_dir_all(&dir).map_err(err)?;
     std::process::Command::new("explorer").arg(&dir).spawn().map_err(err)?;
@@ -1459,8 +1480,25 @@ fn set_settings(app: AppHandle, settings: Settings) -> Res<Settings> {
         let i = lock(&app);
         // замки громкости меняет только микшер (widgets.rs): окно настроек могло прислать старые
         new.volume_locks = i.settings.volume_locks.clone();
-        if i.settings.out_dir != new.out_dir {
-            drop(i);
+        let archive_changed = i.settings.out_dir != new.out_dir;
+        let stage_changed = i.settings.replay_stage_dir != new.replay_stage_dir;
+        let validate_stage = new.fast_replay && (stage_changed || archive_changed || !i.settings.fast_replay);
+        drop(i);
+        if validate_stage {
+            if !new.replay_stage_dir.is_absolute() {
+                return Err("Укажите полный путь к временной папке".into());
+            }
+            std::fs::create_dir_all(&new.replay_stage_dir).map_err(|e| format!("Временная папка недоступна: {e}"))?;
+            let stage = new.replay_stage_dir.canonicalize().map_err(err)?;
+            // The archive can be offline when enabling staging.
+            let dest = new.out_dir.canonicalize().unwrap_or_else(|_| new.out_dir.clone());
+            let normalized = |p: &Path| PathBuf::from(p.to_string_lossy().trim_start_matches(r"\\?\").to_lowercase());
+            let (stage, dest) = (normalized(&stage), normalized(&dest));
+            if stage.starts_with(&dest) || dest.starts_with(&stage) {
+                return Err("Выберите отдельную временную папку вне папки клипов".into());
+            }
+        }
+        if archive_changed {
             check_out_dir(&new.out_dir)?;
         }
     }
@@ -1806,6 +1844,7 @@ pub fn run() {
             sync_autostart(&handle);
             watch_mic(handle.clone());
             power::start(&handle);
+            replay_stage::start(handle.clone());
             storage::watch(handle.clone());
             recover_parts(handle.clone());
             std::thread::spawn(|| export::clean_share(None));

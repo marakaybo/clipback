@@ -49,6 +49,8 @@ pub struct Settings {
     pub max_height: Option<u32>,
     pub monitor: usize,
     pub out_dir: PathBuf,
+    pub fast_replay: bool,
+    pub replay_stage_dir: PathBuf,
     pub hotkey_overlay: String,
     pub hotkey_save: String,
     pub hotkey_screenshot: String,
@@ -108,6 +110,13 @@ impl Default for Settings {
             custom_bitrate: 12,
             max_height: None,
             monitor: 0,
+            fast_replay: false,
+            replay_stage_dir: std::env::var_os("LOCALAPPDATA")
+                .filter(|dir| !dir.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir)
+                .join("io.github.clipback")
+                .join("replay-stage"),
             out_dir: clipback_core::util::videos_dir().join("Clipback"),
             hotkey_overlay: "Alt+Z".into(),
             hotkey_save: "Alt+F10".into(),

@@ -1979,6 +1979,8 @@ function main() {
     $("#set-custom-bitrate-val").textContent = `${s.customBitrate} Мбит/с`;
     $("#set-encoder").textContent = st.capture ? st.capture.encoder : "—";
     $("#set-outdir").textContent = s.outDir;
+    $("#set-fast-replay").checked = s.fastReplay;
+    $("#set-replay-stage").textContent = s.replayStageDir;
 
     // звук
     $$("#set-audio-mode .seg-btn").forEach((b) => b.classList.toggle("active", b.dataset.v === s.audioMode));
@@ -2339,9 +2341,13 @@ function main() {
   $("#refresh-apps").onclick = refreshApps;
 
   $("#set-outdir-open").onclick = () => call("open_clips_folder", {}, "Не удалось открыть папку");
-  async function pickOutDir() {
+  $("#set-fast-replay").onchange = (e) => saveSettings({ fastReplay: e.target.checked });
+  $("#set-replay-stage-open").onclick = () => call("open_clips_folder", { staging: true }, "Не удалось открыть папку");
+  $("#set-replay-stage-pick").onclick = () => pickSettingsFolder("replayStageDir");
+  function pickOutDir() { return pickSettingsFolder("outDir"); }
+  async function pickSettingsFolder(field) {
     const p = await call("pick_folder", {}, "Не удалось выбрать папку");
-    if (p) await saveSettings({ outDir: p });
+    if (p) await saveSettings({ [field]: p });
   }
   $("#set-outdir-pick").onclick = pickOutDir;
   $("#btn-quit").onclick = async () => {
