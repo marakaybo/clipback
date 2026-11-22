@@ -537,6 +537,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "jpeg-encoder",
+ "memchr",
  "mp4",
  "png 0.17.16",
  "serde",

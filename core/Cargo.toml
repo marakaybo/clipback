@@ -17,6 +17,7 @@ path = "src/main.rs"
 anyhow = "1"
 mp4 = "0.14"
 bytes = "1"
+memchr = "2"
 serde = { version = "1", features = ["derive"] }
 png = "0.17"
 windows-core = "0.61"

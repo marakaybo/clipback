@@ -18,28 +18,25 @@ pub(crate) const TIMESCALE: u64 = 90_000;
 
 /// Разбить поток Annex-B на NAL-блоки (без стартовых кодов).
 pub fn split_nals(data: &[u8]) -> Vec<&[u8]> {
-    let mut nals = Vec::new();
-    let mut i = 0;
-    let mut start = None;
-    while i + 3 <= data.len() {
-        let sc = if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
-            3
-        } else if i + 4 <= data.len() && data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 0 && data[i + 3] == 1 {
-            4
-        } else {
-            i += 1;
-            continue;
+    nal_units(data).collect()
+}
+
+// Both Annex-B prefixes end with 00 00 01. trim_zeros also consumes the
+// leading zero of a four-byte prefix. Keep the final NAL's payload intact.
+fn nal_units(data: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let mut markers = memchr::memmem::find_iter(data, &[0, 0, 1]);
+    let mut current = markers.next();
+    std::iter::from_fn(move || loop {
+        let start = current? + 3;
+        current = markers.next();
+        let nal = match current {
+            Some(end) => trim_zeros(&data[start..end]),
+            None => &data[start..],
         };
-        if let Some(s) = start {
-            nals.push(trim_zeros(&data[s..i]));
+        if !nal.is_empty() {
+            return Some(nal);
         }
-        i += sc;
-        start = Some(i);
-    }
-    if let Some(s) = start {
-        nals.push(&data[s..]);
-    }
-    nals.into_iter().filter(|n| !n.is_empty()).collect()
+    })
 }
 
 fn trim_zeros(n: &[u8]) -> &[u8] {
@@ -53,7 +50,7 @@ fn trim_zeros(n: &[u8]) -> &[u8] {
 /// Annex-B -> AVCC (длина + NAL). Служебные SPS/PPS/AUD выкидываются: они лежат в заголовке файла.
 pub fn annexb_to_avcc(data: &[u8]) -> Vec<u8> {
     let mut avcc = Vec::with_capacity(data.len() + 16);
-    for nal in split_nals(data) {
+    for nal in nal_units(data) {
         if matches!(nal[0] & 0x1f, 7 | 8 | 9) {
             continue;
         }
@@ -66,7 +63,7 @@ pub fn annexb_to_avcc(data: &[u8]) -> Vec<u8> {
 /// SPS и PPS из ключевого кадра в формате Annex-B.
 pub fn find_sps_pps(data: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
     let (mut sps, mut pps) = (None, None);
-    for nal in split_nals(data) {
+    for nal in nal_units(data) {
         match nal[0] & 0x1f {
             7 => sps = Some(nal.to_vec()),
             8 => pps = Some(nal.to_vec()),
