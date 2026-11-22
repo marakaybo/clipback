@@ -269,6 +269,53 @@ fn one_track_copy_has_leveled_voice_and_faststart() {
 }
 
 #[test]
+fn one_track_mixes_a_trim_without_a_premix_and_honors_toggles() {
+    let _mf = crate::media::MfScope::new().unwrap();
+    let src = tmp("selection-source.mp4");
+    let mut mic = tone(0.2, 3);
+    let mut app = tone(0.2, 3);
+    for frame in mic.chunks_exact_mut(2) { frame[1] = 0.0; }
+    for frame in app.chunks_exact_mut(2) { frame[0] = 0.0; }
+    let sum = aac(&mic.iter().zip(&app).map(|(a, b)| a + b).collect::<Vec<_>>());
+    let (mic, app) = (aac(&mic), aac(&app));
+    let silence = crate::aac::silent_frame().unwrap();
+    let inputs = [&sum, &app, &mic, &app].map(|packets| AudioInput { packets, silence: &silence });
+    let mut names = default_track_names(3);
+    names.push("Discord".into());
+    write_av_named(&src, &packets(3), &inputs, &names, 640, 360).unwrap();
+
+    let export = |src: &Path, name, keep: Option<&[usize]>, gains: Option<&[f32]>| {
+        let dst = tmp(name);
+        one_track_selected(src, &dst, keep, gains, &mut |_| {}, &crate::media::NEVER).unwrap();
+        dst
+    };
+    let levels = |path: &Path| {
+        let (tracks, _) = read_audio_segment(path, 0.5, 1.5, None).unwrap();
+        assert_eq!(tracks.len(), 1);
+        let (_, pcm) = crate::media::decode_track(&tracks[0]).unwrap();
+        [0, 1].map(|c| rms(&pcm[4096 + c..].iter().step_by(2).copied().collect::<Vec<_>>()))
+    };
+    let check_levels = |path: &Path, target: [f32; 2]| {
+        let actual = levels(path);
+        assert!((0..2).all(|c| (actual[c] - target[c]).abs() < 0.008), "{path:?}: {actual:?}, expected {target:?}");
+    };
+    let level = 0.2 * std::f32::consts::FRAC_1_SQRT_2;
+    check_levels(&export(&src, "selection-all.mp4", None, None), [level, level]);
+    check_levels(&export(&src, "selection-sys.mp4", Some(&[1, 3]), None), [0.0, level]);
+    check_levels(&export(&src, "selection-mic-app.mp4", Some(&[2, 3]), Some(&[0.0, 0.0, 0.5, 0.25])), [level * 0.5, level * 0.25]);
+
+    let trimmed = tmp("selection-trim.mp4");
+    trim_tracks(&src, &trimmed, 1.0, 3.0, Some(&[2, 3]), None).unwrap();
+    assert_eq!(clip_info(&trimmed).unwrap().audio_names, ["Микрофон", "Discord"]);
+    let mixed = export(&trimmed, "selection-remix.mp4", None, None);
+    check_levels(&mixed, [level, level]);
+    check_levels(&export(&mixed, "selection-quieter.mp4", None, Some(&[0.5])), [level * 0.5, level * 0.5]);
+    check_levels(&export(&mixed, "selection-zero-gain.mp4", None, Some(&[0.0])), [0.0, 0.0]);
+    let silent = export(&mixed, "selection-no-audio.mp4", Some(&[]), None);
+    assert_eq!(clip_info(&silent).unwrap().audio_tracks, 0);
+}
+
+#[test]
 fn trim_reports_progress_and_can_be_cancelled() {
     let src = tmp("prog-src.mp4");
     write_mp4(&src, &packets(5), 640, 360).unwrap();

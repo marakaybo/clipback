@@ -63,3 +63,49 @@ assert.strictEqual(TrackAudio.needsSync(10, 10.05), true);
 assert.strictEqual(TrackAudio.needsSync(10, 9.9), true);
 assert.strictEqual(TrackAudio.needsSync(10, 10.03, 0.03), false);
 console.log("trackaudio: ok");
+
+async function testPreviewSeekAndPendingChanges() {
+  class Media extends EventTarget {
+    paused = true;
+    readyState = 4;
+    currentTime = 0;
+    playbackRate = 1;
+    play() { this.paused = false; return Promise.resolve(); }
+    pause() { this.paused = true; }
+    removeAttribute() {}
+    load() {}
+  }
+  const audios = [];
+  global.Audio = class extends Media { constructor() { super(); audios.push(this); } };
+  const node = () => ({ gain: {}, threshold: {}, knee: {}, ratio: {}, attack: {}, release: {},
+    connect(to) { return to; }, disconnect() {} });
+  global.AudioContext = class { createGain = node; createDynamicsCompressor = node; createMediaElementSource = node; };
+  let requests = 0, resolve;
+  const video = new Media();
+  video.currentTime = 2;
+  video.paused = false;
+  const player = require("../trackaudio.js").create(video, {
+    api: { call() { requests++; return new Promise((r) => resolve = r); } }, fileUrl: (p) => p
+  });
+  const clip = {path: "x", modified: 1};
+  const plan = { native: false, tracks: [{index: 1, gain: 1}] };
+  const loading = player.set(clip, plan);
+  await player.set(clip, { ...plan, tracks: [{index: 1, gain: 0.4}] });
+  assert.equal(requests, 1);
+  assert.equal(video.muted, true);
+  resolve(["1.m4a"]); await loading;
+  assert.equal(audios[0].currentTime, 2);
+  video.seeking = true; video.dispatchEvent(new Event("seeking"));
+  assert.equal(audios[0].paused, true);
+  video.currentTime = 12;
+  video.seeking = false; video.dispatchEvent(new Event("seeked"));
+  assert.equal(audios[0].currentTime, 12);
+  video.dispatchEvent(new Event("waiting"));
+  audios[0].dispatchEvent(new Event("canplay"));
+  assert.equal(audios[0].paused, true);
+  video.currentTime = 14; video.dispatchEvent(new Event("playing"));
+  assert.equal(audios[0].currentTime, 14);
+  player.set(null);
+  assert.equal(audios[0].paused, true);
+}
+testPreviewSeekAndPendingChanges().catch((err) => { console.error(err); process.exitCode = 1; });

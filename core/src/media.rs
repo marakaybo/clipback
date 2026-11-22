@@ -194,12 +194,68 @@ pub(crate) fn remix_needed(src: &Path, names: &[String], gain: &dyn Fn(usize) ->
     (!(unchanged(gain(s)) && unchanged(gain(m)) && unchanged(gain(0))) || !mux::mix_leveled(src)).then_some((s, m))
 }
 
+/// Source indices and linear gains are in file order, including the hidden mix.
+#[derive(Clone, Copy, Default)]
+pub struct ExportAudio<'a> {
+    pub keep: Option<&'a [usize]>,
+    pub gains: Option<&'a [f32]>,
+    pub mixdown: bool,
+}
+
+impl ExportAudio<'_> {
+    pub(crate) fn gain(&self, i: usize) -> f32 {
+        self.gains.and_then(|g| g.get(i)).copied().unwrap_or(1.0).clamp(0.0, 4.0)
+    }
+
+    pub(crate) fn indices(&self, names: &[String]) -> Vec<usize> {
+        if !self.mixdown {
+            return self.keep.map_or_else(|| (0..names.len()).collect(), |k| k.iter().copied().filter(|&i| i < names.len()).collect());
+        }
+        let selected = |i| self.keep.is_none_or(|k| k.contains(&i));
+        if let Some((sys, mic)) = mix_sources(names) {
+            if selected(0) || (selected(sys) && selected(mic)) {
+                // The existing mix already contains the mic and all desktop apps.
+                // remix_needed rebuilds it when source gains or leveling differ.
+                return vec![0];
+            }
+        }
+        let sys = names.iter().position(|n| n == "Звук системы").filter(|&i| selected(i));
+        let mic = names.iter().position(|n| n == "Микрофон");
+        (0..names.len()).filter(|&i| selected(i) && (sys.is_none() || Some(i) == sys || Some(i) == mic)).collect()
+    }
+
+    pub fn track_count(&self, names: &[String]) -> usize {
+        let n = self.indices(names).len();
+        if self.mixdown { n.min(1) } else { n }
+    }
+
+    pub(crate) fn needs_render(&self, src: &Path, names: &[String], indices: &[usize]) -> bool {
+        (self.mixdown && indices.len() > 1)
+            || indices.iter().any(|&i| !unchanged(self.gain(i)))
+            || (indices.contains(&0) && remix_needed(src, names, &|i| self.gain(i)).is_some())
+    }
+
+    pub(crate) fn segment(
+        &self, src: &Path, start: f64, end: f64, names: &[String], indices: &[usize],
+        progress: &mut dyn FnMut(f64), cancel: &AtomicBool,
+    ) -> Result<(Vec<Vec<Arc<AudioPacket>>>, Vec<String>)> {
+        if !self.mixdown {
+            return audio_segment_with(src, start, end, Some(indices), self.gains, progress, cancel);
+        }
+        if !self.needs_render(src, names, indices) {
+            return mux::read_audio_segment(src, start, end, Some(indices));
+        }
+        let _mf = MfScope::new()?;
+        let piece = crate::montage::Piece { src_start: (start * 1e7).round() as i64, src_end: (end * 1e7).round() as i64, out_start: 0, frames: 0 };
+        crate::montage::build_audio(src, &[piece], names, self, indices, progress, cancel)
+    }
+}
+
 /// Перекодируется ли звук отрезка (иначе кадры AAC копируются как есть).
 pub fn audio_rework(src: &Path, keep: Option<&[usize]>, gains: Option<&[f32]>) -> bool {
     let n = mux::clip_info(src).map(|i| i.audio_names).unwrap_or_default();
-    let gain = |i: usize| gains.and_then(|g| g.get(i)).copied().unwrap_or(1.0);
-    let idx: Vec<usize> = keep.map_or_else(|| (0..n.len()).collect(), |k| k.to_vec());
-    idx.iter().any(|&i| !unchanged(gain(i))) || (idx.contains(&0) && remix_needed(src, &n, &gain).is_some())
+    let audio = ExportAudio { keep, gains, mixdown: false };
+    audio.needs_render(src, &n, &audio.indices(&n))
 }
 
 /// Звук отрезка [start; end) секунд: кадры AAC дорожек `keep` (None — всех) и их названия,
@@ -439,6 +495,13 @@ pub fn transcode(
     progress: &mut dyn FnMut(f64),
     cancel: &AtomicBool,
 ) -> Result<TrimResult> {
+    transcode_with_audio(src, dst, start, end, ExportAudio { keep: audio_keep, gains: audio_gains, mixdown: false }, q, progress, cancel)
+}
+
+pub fn transcode_with_audio(
+    src: &Path, dst: &Path, start: f64, end: f64, audio: ExportAudio<'_>, q: &Quality,
+    progress: &mut dyn FnMut(f64), cancel: &AtomicBool,
+) -> Result<TrimResult> {
     if end <= start {
         bail!("конец отрезка раньше начала");
     }
@@ -539,8 +602,9 @@ pub fn transcode(
     }
 
     // звук: те же кадры AAC из исходника, сдвинутые к началу отрезка (или с другой громкостью)
-    let (tracks, names) =
-        audio_segment_with(src, first_ts as f64 / 1e7, last_end as f64 / 1e7, audio_keep, audio_gains, &mut |f| progress(VIDEO_SHARE + f * (0.99 - VIDEO_SHARE)), cancel)?;
+    let indices = audio.indices(&info.audio_names);
+    let (tracks, names) = audio.segment(src, first_ts as f64 / 1e7, last_end as f64 / 1e7, &info.audio_names, &indices,
+        &mut |f| progress(VIDEO_SHARE + f * (0.99 - VIDEO_SHARE)), cancel)?;
     let silence = if tracks.is_empty() { Vec::new() } else { crate::aac::silent_frame()? };
     let inputs: Vec<mux::AudioInput> = tracks.iter().map(|t| mux::AudioInput { packets: t, silence: &silence }).collect();
     mux::write_av_named(dst, &packets, &inputs, &names, out_w, out_h)?;

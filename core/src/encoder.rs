@@ -32,7 +32,13 @@ pub struct Encoder {
     need_input: u32,
     provides_samples: bool,
     out_buf_size: u32,
-    frame_dur: i64,
+    fps: u32,
+}
+
+/// Absolute frame boundary in Media Foundation's 100 ns units. Rounding the
+/// period before multiplying loses four microseconds per second at 60 fps.
+pub(crate) fn frame_pts(index: i64, fps: u32) -> i64 {
+    (i128::from(index) * 10_000_000 / i128::from(fps)) as i64
 }
 
 fn set_codec(api: &ICodecAPI, key: &GUID, v: VARIANT, what: &str) {
@@ -120,7 +126,7 @@ impl Encoder {
                 need_input: 0,
                 provides_samples,
                 out_buf_size: info.cbSize.max(s.width * s.height),
-                frame_dur: 10_000_000 / s.fps as i64,
+                fps: s.fps,
             })
         }
     }
@@ -151,7 +157,8 @@ impl Encoder {
     }
 
     pub fn push(&mut self, tex: &ID3D11Texture2D, frame_index: i64) -> Result<()> {
-        self.push_at(tex, frame_index * self.frame_dur, self.frame_dur)
+        let pts = frame_pts(frame_index, self.fps);
+        self.push_at(tex, pts, frame_pts(frame_index + 1, self.fps) - pts)
     }
 
     /// Подать кадр с явным временем (единицы 100 нс).

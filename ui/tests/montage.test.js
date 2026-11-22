@@ -74,6 +74,32 @@ t("отмена и повтор", () => {
   assert.strictEqual(h.undo.length, 2);
 });
 
+t("две вырезки внутри отрезка, в том числе в обратную сторону", () => {
+  const p = P([5, 55]);
+  const first = Cuts.removeRange(p, 15, 20, F);
+  const second = Cuts.removeRange(first, 40, 30, F);
+  assert.deepStrictEqual(second, P([5, 15], [20, 30], [40, 55]));
+  assert.strictEqual(Cuts.total(second), 35);
+  assert.deepStrictEqual(Cuts.removeRange(second, 12, 45, F), P([5, 12], [45, 55]));
+  assert.deepStrictEqual(Cuts.removeRange(second, 0, 60, F), []);
+  assert.deepStrictEqual(p, P([5, 55]));
+});
+
+t("пустая вырезка, старый пропуск и вырезка короче кадра не создают правку", () => {
+  const p = P([5, 15], [20, 30]);
+  for (const [s, e] of [[12, 12], [15, 20], [0, 5], [10, 10.001], [14.999, 20.001]]) {
+    assert.strictEqual(Cuts.removeRange(p, s, e, F), p);
+  }
+  assert.deepStrictEqual(Cuts.removeRange(p, 5, 5 + F, F), P([5 + F, 15], [20, 30]));
+});
+
+t("соседние куски склеиваются в сводке экспорта, разрезы остаются редактируемыми", () => {
+  const p = P([0, 5], [5, 10], [10, 12], [20, 30]);
+  assert.deepStrictEqual(Cuts.exportRanges(p), P([0, 12], [20, 30]));
+  assert.deepStrictEqual(p, P([0, 5], [5, 10], [10, 12], [20, 30]));
+  assert.deepStrictEqual(Cuts.exportRanges([]), []);
+});
+
 t("время монтажа ↔ время исходника", () => {
   const p = P([2, 10], [20, 30], [40, 45]); // 8 + 10 + 5
   assert.strictEqual(Cuts.total(p), 23);

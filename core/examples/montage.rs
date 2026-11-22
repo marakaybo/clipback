@@ -1,6 +1,6 @@
 //! Монтаж без интерфейса — проверить склейку на копии клипа.
 //!
-//!   cargo run --release --example montage -- <клип.mp4> <выход.mp4> 1.5-4 7-9.25 12-20 [--gains 1,0.5,2]
+//!   cargo run --release --example montage -- <клип.mp4> <выход.mp4> 1.5-4 7-9.25 12-20 [--gains 1,0.5,2] [--mixdown]
 
 use anyhow::{bail, Context, Result};
 use clipback_core::montage;
@@ -14,9 +14,11 @@ fn main() -> Result<()> {
     }
     let (src, dst) = (Path::new(&args[0]), Path::new(&args[1]));
     let mut ranges = Vec::new();
+    let mut mixdown = false;
     let mut gains: Option<Vec<f32>> = None;
     let mut it = args[2..].iter();
     while let Some(a) = it.next() {
+        if a == "--mixdown" { mixdown = true; continue; }
         if a == "--gains" {
             gains = Some(it.next().context("--gains без значений")?.split(',').map(|g| g.parse()).collect::<Result<_, _>>()?);
             continue;
@@ -26,7 +28,8 @@ fn main() -> Result<()> {
     }
     let q = montage::source_quality(src)?;
     let t = std::time::Instant::now();
-    let r = montage::montage(src, dst, &ranges, None, gains.as_deref(), &q, &mut |_| {}, &AtomicBool::new(false))?;
+    let audio = clipback_core::media::ExportAudio { keep: None, gains: gains.as_deref(), mixdown };
+    let r = montage::montage_with_audio(src, dst, &ranges, audio, &q, &mut |_| {}, &AtomicBool::new(false))?;
     let (times, end) = montage::frame_times(src)?;
     for p in montage::plan(&times, end, &ranges) {
         println!("кусок {:.4}–{:.4} с -> с {:.4} с, кадров {}", p.src_start as f64 / 1e7, p.src_end as f64 / 1e7, p.out_start as f64 / 1e7, p.frames);

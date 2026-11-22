@@ -13,9 +13,29 @@
 .mt-piece.picked { height: auto; bottom: 0; border: 2px solid var(--accent-text); border-radius: var(--r-sm); background: var(--accent-wash-2); }
 .mt-cut { position: absolute; top: -3px; height: 46px; width: 2px; margin-left: -1px; background: var(--accent-text); border-radius: 1px; }
 
-.mt-hint { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 8px 12px 0; font-size: var(--fs-xs); color: var(--text-3); }
+.mt-draft {
+  position: absolute; top: 18px; height: 40px; min-width: 2px; pointer-events: none;
+  border: 1px dashed var(--warn); background: repeating-linear-gradient(135deg, transparent 0 5px, rgba(245,196,81,.22) 5px 9px);
+}
+.mt-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; margin: 8px 0 0; }
+.mt-tools .mt-range { color: var(--accent-text); background: var(--accent-wash); }
+.mt-prompt { color: var(--text-2); font-size: var(--fs-sm); }
+.mt-keys { position: relative; font-size: var(--fs-sm); color: var(--text-3); }
+.mt-keys summary { cursor: pointer; padding: 4px; }
+.mt-hint {
+  position: absolute; z-index: 3; bottom: 100%; left: 0; width: max-content;
+  display: grid; gap: 4px; padding: 8px; border: 1px solid var(--line); border-radius: var(--r);
+  background: var(--s2); color: var(--text-2); font-size: var(--fs-xs);
+}
 .mt-hint kbd { font: 600 var(--fs-xs) var(--mono); padding: 0 5px; border-radius: var(--r-sm); background: var(--s3); color: var(--text-2); }
-.mt-hint.selecting span:nth-child(4) kbd { background: var(--accent-wash-2); color: var(--accent-text); }
+.mt-count { margin-top: 2px; color: var(--accent-text); font-variant-numeric: tabular-nums; }
+.mt-source { margin-top: 6px; color: var(--text-3); font-size: var(--fs-sm); }
+.mt-preview ol {
+  margin: 2px 0 0; padding-left: 28px; max-height: 6.5em; overflow-y: auto;
+  color: var(--text-2); font: var(--fs-sm)/1.6 var(--mono);
+}
+.mt-preview li::marker { color: var(--text-3); }
+.mt-preview ol:empty { display: none; }
 
 /* сохранение монтажа — всегда копией рядом с оригиналом */
 .montage-on .field:has(#save-mode) { display: none; }

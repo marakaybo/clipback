@@ -144,6 +144,11 @@
   const trashBin = {};
   let trashSeq = 0;
 
+  function savedAudio(c, keep, mix) {
+    const names = keep ? keep.map((i) => c.audioNames[i]) : c.audioNames || [];
+    const audioNames = mix && names.length > 1 ? ["Всё вместе"] : names;
+    return { audioNames, audioTracks: audioNames.length };
+  }
   const handlers = {
     get_state: () => state,
     fix_capture_blocked: async () => {
@@ -220,32 +225,31 @@
       emit("clips-changed");
       return c;
     },
-    trim_clip: async ({ path, start, end, replace, audioKeep, quality }) => {
+    trim_clip: async ({ path, start, end, replace, audioKeep, quality, mixdown }) => {
       // без перекодирования быстро, с ним — дольше
       await (quality && quality !== "original" ? fakeWork(40, 100) : fakeWork(12, 60));
       const c = find(path);
       if (!c) throw "файл не найден";
-      const tracks = audioKeep ? audioKeep.length : c.audioTracks;
-      const names = audioKeep ? audioKeep.map((i) => c.audioNames[i]) : c.audioNames;
+      const audio = savedAudio(c, audioKeep, mixdown || quality?.startsWith("discord:"));
       const s = Math.floor(start);
       const markers = c.markers.filter((m) => m >= s && m <= end).map((m) => m - s);
       if (replace) {
-        Object.assign(c, { duration: end - s, size: Math.round((end - s) * 2.6e6), markers, modified: Date.now(), audioTracks: tracks, audioNames: names });
+        Object.assign(c, { duration: end - s, size: Math.round((end - s) * 2.6e6), markers, modified: Date.now(), ...audio });
         emit("clips-changed");
         return { clip: c, start: s, end };
       }
-      const n = mk(`${c.name} (отрезок)`, 0, end - s, c.hue, "video", { seed: c.seed, markers, audioTracks: tracks, audioNames: names });
+      const n = mk(`${c.name} (отрезок)`, 0, end - s, c.hue, "video", { seed: c.seed, markers, ...audio });
       clips.push(n);
       emit("clips-changed");
       return { clip: n, start: s, end };
     },
     // монтаж: куски подряд одним файлом; «Отмена» обрывает сохранение
-    montage_clip: async ({ path, pieces }) => {
+    montage_clip: async ({ path, pieces, audioKeep, quality, mixdown }) => {
       await fakeWork(30, 120);
       const c = find(path);
       if (!c) throw "файл не найден";
       const dur = pieces.reduce((a, [s, e]) => a + (e - s), 0);
-      const n = mk(`${c.name} (монтаж)`, 0, dur, c.hue, "video", { seed: c.seed, markers: [], audioTracks: c.audioTracks, audioNames: c.audioNames });
+      const n = mk(`${c.name} (монтаж)`, 0, dur, c.hue, "video", { seed: c.seed, markers: [], ...savedAudio(c, audioKeep, mixdown || quality?.startsWith("discord:")) });
       clips.push(n);
       emit("clips-changed");
       return { clip: n, duration: dur, pieces: pieces.length };
@@ -260,11 +264,11 @@
       await fakeWork(10, 60);
       return path;
     },
-    one_track_clips: async ({ paths }) => {
+    one_track_clips: async ({ paths, audioKeep }) => {
       await fakeWork(25 * paths.length, 70);
       const out = paths.map((p) => {
         const c = find(p);
-        const n = mk(`${c.name} (одна дорожка)`, 0, c.duration, c.hue, "video", { seed: c.seed, markers: c.markers, audioTracks: 1, audioNames: ["Всё вместе"] });
+        const n = mk(`${c.name} (одна дорожка)`, 0, c.duration, c.hue, "video", { seed: c.seed, markers: c.markers, ...savedAudio(c, paths.length === 1 ? audioKeep : null, true) });
         n.size = Math.round(c.size * 0.97);
         clips.push(n);
         return n;

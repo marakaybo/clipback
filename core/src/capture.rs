@@ -50,6 +50,8 @@ pub struct Duplicator {
     pub pointer: Pointer,
     /// Курсор сдвинулся или сменил форму с прошлого раза.
     pub pointer_changed: bool,
+    /// DXGI LastPresentTime for the acquired surface, in raw QPC ticks (zero for pointer-only).
+    pub(crate) present_qpc: i64,
     /// Ошибки подряд — пересоздаём захват только если они не проходят сами.
     errors_in_row: u32,
     /// Журнал: одинаковые ошибки пишем не чаще раза в 30 с, со счётчиком.
@@ -99,6 +101,7 @@ impl Duplicator {
             holding: false,
             pointer: Pointer::default(),
             pointer_changed: false,
+            present_qpc: 0,
             errors_in_row: 0,
             err_logged: None,
             err_unlogged: 0,
@@ -244,6 +247,7 @@ impl Duplicator {
         match unsafe { dup.AcquireNextFrame(timeout_ms, &mut info, &mut resource) } {
             Ok(()) => {
                 self.holding = true;
+                self.present_qpc = info.LastPresentTime;
                 self.errors_in_row = 0;
                 self.read_pointer(&dup, &info);
                 match resource.and_then(|r| r.cast::<ID3D11Texture2D>().ok()) {

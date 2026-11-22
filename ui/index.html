@@ -117,7 +117,7 @@
             <div class="player-head-actions">
               <button class="icon-btn sm hide-btn" id="btn-hide" title="Скрыть запись — превью будет размыто"><svg viewBox="0 0 24 24"><path d="M3 3l18 18"/><path d="M10.6 5.1A10 10 0 0 1 12 5c5 0 9 4.5 10 7a14 14 0 0 1-3.2 4.2M6.6 6.6A14 14 0 0 0 2 12c1 2.5 5 7 10 7a9.6 9.6 0 0 0 4.4-1.1"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg></button>
               <button class="icon-btn sm star-btn" id="btn-fav" title="В избранное — автоочистка не тронет"><svg viewBox="0 0 24 24"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/></svg></button>
-              <button class="icon-btn sm" id="btn-copy" title="Копировать файл (потом Ctrl+V в Discord)">
+              <button class="icon-btn sm" id="btn-copy" title="Копировать весь клип для отправки с одной звуковой дорожкой">
                 <svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg>
               </button>
               <button class="icon-btn sm" id="btn-reveal" title="Показать в папке">
@@ -164,7 +164,7 @@
               <svg viewBox="0 0 24 24"><path d="M4 20l1-4L16 5l3 3L8 19z"/><path d="M14 7l3 3"/></svg>
               <span>Редактировать</span>
             </button>
-            <button class="btn btn-ghost" id="btn-shot-copy" title="Копировать файл (потом Ctrl+V в Discord)">
+            <button class="btn btn-ghost" id="btn-shot-copy" title="Копировать изображение">
               <svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg>
               <span>Копировать</span>
             </button>
@@ -183,6 +183,7 @@
             <button class="icon-btn sm" id="btn-fwd" title="+5 с (→)"><svg viewBox="0 0 24 24"><path d="M13 17l5-5-5-5M6 17l5-5-5-5"/></svg></button>
             <div class="timecode"><span id="tc-cur">0:00.00</span><span class="tc-sep">/</span><span id="tc-dur">0:00.00</span></div>
             <div class="spacer"></div>
+            <span id="audio-preparing" class="muted small-note" role="status" hidden>Загрузка дорожек…</span>
             <div class="volume">
               <button class="icon-btn sm" id="btn-mute" title="Звук (M)"><svg viewBox="0 0 24 24" id="vol-icon"><path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M16 9a4 4 0 0 1 0 6"/></svg></button>
               <input type="range" id="vol" min="0" max="100" value="80" title="Громкость">
@@ -304,6 +305,14 @@
           <div class="hint" id="quality-hint"></div>
         </div>
 
+        <div class="field" id="sound-export-field">
+          <label id="sound-export-label">Звук в файле</label>
+          <div class="seg full" id="sound-export-mode" role="group" aria-labelledby="sound-export-label">
+            <button class="seg-btn" data-mode="separate">Раздельно</button>
+            <button class="seg-btn" data-mode="mix">В одну дорожку</button>
+          </div>
+          <div class="hint" id="sound-export-result" aria-live="polite"></div>
+        </div>
         <div class="spacer"></div>
 
         <div class="estimate">
@@ -321,9 +330,9 @@
           <svg viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>
           Сохранить кадр
         </button>
-        <button class="btn btn-ghost wide" id="btn-one" title="Копия рядом с клипом: голос и игра на одной звуковой дорожке — так её правильно сыграют Discord, Telegram и любые плееры" hidden>
+        <button class="btn btn-ghost wide" id="btn-one" title="Сохранить весь клип рядом с оригиналом с выбранным звуком для отправки" hidden>
           <svg viewBox="0 0 24 24"><path d="M4 12h3l2-5 3 10 3-8 2 3h3"/></svg>
-          Одна дорожка
+          Копия всего клипа для отправки
         </button>
       </aside>
     </div>

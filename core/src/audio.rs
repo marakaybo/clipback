@@ -36,12 +36,20 @@ pub enum SourceKind {
 /// Текущее время в единицах 100 нс по тем же часам, что и у WASAPI (QPC).
 pub fn qpc_now() -> i64 {
     let mut c = 0i64;
-    let mut f = 0i64;
     unsafe {
         let _ = QueryPerformanceCounter(&mut c);
-        let _ = QueryPerformanceFrequency(&mut f);
     }
-    (c as i128 * 10_000_000 / f.max(1) as i128) as i64
+    qpc_to_100ns(c)
+}
+
+pub(crate) fn qpc_to_100ns(counter: i64) -> i64 {
+    static FREQUENCY: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    let freq = FREQUENCY.get_or_init(|| {
+        let mut f = 0;
+        unsafe { let _ = QueryPerformanceFrequency(&mut f); }
+        f.max(1)
+    });
+    (i128::from(counter) * 10_000_000 / i128::from(*freq)) as i64
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

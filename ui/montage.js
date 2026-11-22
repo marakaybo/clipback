@@ -38,6 +38,34 @@
     remove(p, i) {
       return i >= 0 && i < p.length ? [...p.slice(0, i), ...p.slice(i + 1)] : p;
     },
+    // Оба края задаются курсором в исходнике. Один жест может пересекать старые вырезки.
+    removeRange(p, a, b, min) {
+      const lo = Math.min(a, b), hi = Math.max(a, b);
+      if (hi - lo + EPS < min) return p;
+      const kept = [];
+      let removed = 0;
+      for (const pc of p) {
+        const s = Math.max(lo, pc.s), e = Math.min(hi, pc.e);
+        if (e <= s) {
+          kept.push(pc);
+          continue;
+        }
+        removed += e - s;
+        if (s > pc.s) kept.push({ s: pc.s, e: s });
+        if (e < pc.e) kept.push({ s: e, e: pc.e });
+      }
+      return removed > EPS && removed + EPS >= min ? kept : p;
+    },
+    // Один разрез без вырезки не прерывает исходный фрагмент при экспорте.
+    exportRanges(p) {
+      const ranges = [];
+      for (const { s, e } of p) {
+        const last = ranges[ranges.length - 1];
+        if (last && last.e === s) last.e = e;
+        else ranges.push({ s, e });
+      }
+      return ranges;
+    },
     /// Время исходника → время в готовом монтаже. Из убранного — начало следующего куска.
     srcToOut(p, t) {
       let acc = 0;
@@ -69,7 +97,7 @@
     },
   };
 
-  /// История правок: снимки списка (null — монтажа нет). Ctrl+Z / Ctrl+Y.
+  /// История правок. Плеер хранит список кусков или границы обычного отрезка.
   function History() {
     return {
       cur: null,
@@ -129,10 +157,10 @@
   /// h — то, что даёт плеер (app.js): состояние S и его функции.
   function create(h) {
     const { S, $, tl } = h;
-    const M = { hist: History(), base: null, sel: -1, selecting: false, saving: false };
+    const M = { hist: History(), anchor: null, sel: -1, selecting: false };
     let keys = loadKeys();
-    const pieces = () => M.hist.cur;
-    const active = () => M.hist.cur !== null;
+    const active = () => Array.isArray(M.hist.cur);
+    const pieces = () => active() ? M.hist.cur : null;
     const isVideo = () => !!(S.clip && S.clip.kind === "video" && !S.clip.broken);
     const minLen = () => 1 / ((S.clip && S.clip.fps) || 60);
 
@@ -140,44 +168,90 @@
     const layer = document.createElement("div");
     layer.className = "mt-layer";
     tl.insertBefore(layer, $("#playhead"));
-    const hint = document.createElement("div");
-    hint.className = "mt-hint";
-    tl.after(hint);
+    const draft = document.createElement("div");
+    draft.className = "mt-draft";
+    draft.hidden = true;
+    tl.insertBefore(draft, $("#playhead"));
+
+    const tools = document.createElement("div");
+    tools.className = "mt-tools";
+    tools.innerHTML = `
+      <button type="button" class="chip mt-range">Убрать фрагмент…</button>
+      <button type="button" class="chip mt-cancel" hidden>Отмена</button>
+      <button type="button" class="chip mt-undo" title="Ctrl+Z" disabled>Отменить правку</button>
+      <button type="button" class="chip mt-redo" title="Ctrl+Y" hidden>Повторить</button>
+      <details class="mt-keys"><summary>Клавиши</summary><div class="mt-hint"></div></details>
+      <span class="mt-prompt"></span>`;
+    tl.after(tools);
+    const rangeBtn = tools.querySelector(".mt-range");
+    const cancelBtn = tools.querySelector(".mt-cancel");
+    const undoBtn = tools.querySelector(".mt-undo");
+    const redoBtn = tools.querySelector(".mt-redo");
+    const prompt = tools.querySelector(".mt-prompt");
+    const hint = tools.querySelector(".mt-hint");
+    const preview = document.createElement("section");
+    preview.className = "mt-preview field";
+    preview.hidden = true;
+    preview.innerHTML = `<b>В один файл</b><div class="mt-count" role="status"></div>
+      <div class="mt-source">Время в исходном клипе</div><ol aria-label="Время в исходном клипе"></ol>`;
+    $("#export .panel-head").after(preview);
+
+    const start = () => pieces() || [{ s: S.inT, e: S.outT }];
+    function updateRange() {
+      if (!isVideo() || S.busy) return;
+      if (S.playing) h.setPlaying(false);
+      if (M.anchor === null) {
+        M.anchor = S.t;
+        M.selecting = false;
+        M.sel = -1;
+        h.updateAll();
+      } else {
+        const p = start();
+        const next = Cuts.removeRange(p, M.anchor, S.t, minLen());
+        if (next !== p) apply(next);
+      }
+    }
+    function cancelRange() {
+      M.anchor = null;
+      h.updateAll();
+    }
+    rangeBtn.onclick = updateRange;
+    cancelBtn.onclick = cancelRange;
+    undoBtn.onclick = undo;
+    redoBtn.onclick = redo;
 
     function apply(next) {
+      if (!active()) M.hist.cur = { inT: S.inT, outT: S.outT };
       if (!M.hist.apply(next)) return;
+      M.anchor = null;
       M.sel = -1;
       changed();
-    }
-    // первая правка начинается с выделенного отрезка (или всего клипа)
-    function start() {
-      if (active()) return pieces();
-      M.base = { inT: S.inT, outT: S.outT };
-      return [{ s: S.inT, e: S.outT }];
     }
     function changed() {
       if (active()) {
         S.inT = 0;
         S.outT = S.clip.duration;
-      } else if (M.base) {
-        S.inT = M.base.inT;
-        S.outT = M.base.outT;
+      } else if (M.hist.cur) {
+        S.inT = M.hist.cur.inT;
+        S.outT = M.hist.cur.outT;
       }
       if (!active()) M.selecting = false;
       h.updateAll();
     }
 
     function edit(id) {
-      const t = S.t;
-      if (id === "cut") apply(Cuts.cut(start(), t, minLen()));
-      else if (id === "left") apply(Cuts.removeLeft(start(), t, minLen()));
-      else if (id === "right") apply(Cuts.removeRight(start(), t, minLen()));
+      const p = start();
+      const action = { cut: Cuts.cut, left: Cuts.removeLeft, right: Cuts.removeRight }[id];
+      const next = action(p, S.t, minLen());
+      if (next !== p) apply(next);
     }
 
     function undo() {
+      if (!isVideo() || S.busy || M.anchor !== null) return;
       if (M.hist.back()) (M.sel = -1), changed();
     }
     function redo() {
+      if (!isVideo() || S.busy || M.anchor !== null) return;
       if (M.hist.forward()) (M.sel = -1), changed();
     }
 
@@ -185,6 +259,18 @@
       if (!isVideo() || S.busy || capturing) return false;
       if ($("#settings").classList.contains("open")) return false;
       const ctrl = e.ctrlKey || e.metaKey;
+      if (M.anchor !== null) {
+        if (e.key === "Escape" || (ctrl && e.code === "KeyZ" && !e.shiftKey)) {
+          e.preventDefault();
+          cancelRange();
+          return true;
+        }
+        // Пока выбирается край, Delete не должен уходить в корзину библиотеки.
+        if (["Delete", "Backspace"].includes(e.code) || ACTIONS.some((a) => keys[a.id].includes(e.code))) {
+          e.preventDefault();
+          return true;
+        }
+      }
       if (ctrl && !e.altKey) {
         if (e.code === "KeyZ" && !e.shiftKey && M.hist.undo.length) return e.preventDefault(), undo(), true;
         if ((e.code === "KeyY" || (e.code === "KeyZ" && e.shiftKey)) && M.hist.redo.length) return e.preventDefault(), redo(), true;
@@ -216,9 +302,9 @@
     tl.addEventListener(
       "pointerdown",
       (e) => {
-        if (!M.selecting || !active() || e.button !== 0 || e.target.closest(".ph-knob")) return;
+        if (!M.selecting || !active() || e.button !== 0 || e.target.closest("#tracks, .ph-knob")) return;
         e.preventDefault();
-        e.stopPropagation();
+        e.stopImmediatePropagation();
         const r = tl.getBoundingClientRect();
         M.sel = Cuts.find(pieces(), h.xToT(e.clientX - r.left));
         render();
@@ -228,9 +314,8 @@
     // «Весь клип» убирает и монтаж (вернуть — Ctrl+Z)
     $("#btn-reset").addEventListener("click", () => {
       if (active()) {
-        M.base = null;
-        apply(null);
-      }
+        apply({ inT: 0, outT: S.clip.duration });
+      } else if (M.anchor !== null) cancelRange();
     });
 
     /// Каждый кадр, пока играет: убранное пропускается, после последнего куска — пауза.
@@ -252,36 +337,66 @@
       return true;
     }
 
+    let shownPieces, shownSelection;
     function render() {
       const on = active() && isVideo();
       tl.classList.toggle("mt-on", on);
       tl.classList.toggle("mt-selecting", on && M.selecting);
       document.body.classList.toggle("montage-on", on);
-      renderHint();
-      const head = $("#export .panel-head span");
-      if (head) head.textContent = on ? "Монтаж" : "Отрезок";
-      const btn = $("#btn-export");
-      const label = [...btn.childNodes].reverse().find((n) => n.nodeType === 3 && n.textContent.trim());
-      if (label) label.textContent = on ? " Сохранить монтаж " : " Сохранить отрезок ";
+      tools.hidden = !isVideo();
+      preview.hidden = !on;
+      renderRange();
       if (on !== M.wasOn) {
         M.wasOn = on;
+        $("#export .panel-head span").textContent = on ? "Монтаж" : "Отрезок";
+        const btn = $("#btn-export");
+        const label = [...btn.childNodes].reverse().find((n) => n.nodeType === 3 && n.textContent.trim());
+        if (label) label.textContent = on ? " Сохранить монтаж " : " Сохранить отрезок ";
         h.renderQuality();
         h.updateExport();
       }
-      if (!on) {
-        layer.replaceChildren();
-        return;
+      const p = on ? pieces() : null;
+      if (p !== shownPieces && on) renderPreview(p);
+      if (p !== shownPieces || M.sel !== shownSelection) {
+        if (on) renderPieces(p);
+        else layer.replaceChildren();
+        shownPieces = p;
+        shownSelection = M.sel;
       }
-      const p = pieces();
-      const d = S.clip.duration;
-      const x = (t) => h.tToX(t);
+      if (on) {
+        $("#sel-len").textContent = h.fmt(Cuts.total(p), 1);
+        $("#sel-range").textContent = p.length ? `${h.fmt(Cuts.srcToOut(p, S.t), 1)} в монтаже` : "всё убрано";
+      }
+    }
+
+    function bounds(s, e) {
+      return `${h.fmt(s, 2)} – ${h.fmt(e, 2)}`;
+    }
+    function renderPreview(p) {
+      const ranges = Cuts.exportRanges(p);
+      const total = Cuts.total(p);
+      let summary = `${ranges.length} ${plural(ranges.length)} · ${h.fmt(total, 2)}`;
+      if (!ranges.length) summary += " · Всё убрано. Отмените правку.";
+      else if (total < 0.1) summary += " · Для сохранения нужно хотя бы 0,1 с.";
+      preview.querySelector(".mt-count").textContent = summary;
+      preview.querySelector(".mt-source").hidden = !ranges.length;
+      preview.querySelector("ol").replaceChildren(...ranges.map(({ s, e }) => {
+        const li = document.createElement("li");
+        li.textContent = bounds(s, e);
+        return li;
+      }));
+    }
+    function position(el, s, e) {
+      el.style.left = `${100 * s / S.clip.duration}%`;
+      el.style.width = `${100 * (e - s) / S.clip.duration}%`;
+    }
+    function renderPieces(p) {
       const els = [];
       const gap = (a, b) => {
         if (b - a < EPS) return;
         const g = document.createElement("div");
         g.className = "mt-gap";
-        g.style.left = `${x(a)}px`;
-        g.style.width = `${Math.max(1, x(b) - x(a))}px`;
+        position(g, a, b);
         els.push(g);
       };
       let prev = 0;
@@ -289,44 +404,64 @@
         gap(prev, pc.s);
         const el = document.createElement("div");
         el.className = "mt-piece" + (i === M.sel ? " picked" : "");
-        el.style.left = `${x(pc.s)}px`;
-        el.style.width = `${Math.max(2, x(pc.e) - x(pc.s))}px`;
+        position(el, pc.s, pc.e);
         els.push(el);
         // стык двух кусков без промежутка — видимый разрез
         if (i > 0 && Math.abs(p[i - 1].e - pc.s) < EPS) {
           const c = document.createElement("div");
           c.className = "mt-cut";
-          c.style.left = `${x(pc.s)}px`;
+          c.style.left = el.style.left;
           els.push(c);
         }
         prev = pc.e;
       });
-      gap(prev, d);
+      gap(prev, S.clip.duration);
       layer.replaceChildren(...els);
-      const total = Cuts.total(p);
-      $("#sel-len").textContent = h.fmt(total, 1);
-      $("#sel-range").textContent = p.length ? `${p.length} ${plural(p.length)} · ${h.fmt(Cuts.srcToOut(p, S.t), 1)} в монтаже` : "всё убрано";
+    }
+
+    function renderRange() {
+      const marking = isVideo() && M.anchor !== null;
+      draft.hidden = cancelBtn.hidden = !marking;
+      rangeBtn.textContent = marking ? "Убрать фрагмент" : "Убрать фрагмент…";
+      undoBtn.disabled = marking || S.busy || !M.hist.undo.length;
+      redoBtn.hidden = marking || !M.hist.redo.length;
+      redoBtn.disabled = S.busy;
+      rangeBtn.disabled = S.busy || (active() && !pieces().length);
+      if (marking) {
+        const s = Math.min(M.anchor, S.t), e = Math.max(M.anchor, S.t);
+        position(draft, s, e);
+        const p = start();
+        const canRemove = Cuts.removeRange(p, s, e, minLen()) !== p;
+        rangeBtn.disabled = S.busy || !canRemove;
+        prompt.textContent = canRemove ? `Вырезать ${bounds(s, e)}` : "Укажите другой край вырезки на шкале.";
+      } else {
+        prompt.textContent = M.selecting ? "Щёлкните по куску на шкале." : "Поставьте курсор на начало ненужного фрагмента.";
+        if (active() && !pieces().length) prompt.textContent = "Отмените правку, чтобы вернуть фрагменты.";
+      }
     }
 
     function renderHint() {
-      if (!isVideo()) return void (hint.hidden = true);
-      hint.hidden = false;
       const k = (id) => keys[id].map(keyLabel).join(" / ");
       const items = [
         [k("cut"), "разрезать"],
         [k("left"), "убрать слева"],
         [k("right"), "убрать справа"],
-        [k("select"), M.selecting ? "выбор: щёлкните кусок" : "выбор"],
+        [k("select"), "выбор куска"],
         [k("remove"), "убрать кусок"],
         ["Ctrl+Z", "отменить"],
       ];
-      hint.classList.toggle("selecting", M.selecting && active());
-      hint.innerHTML = items.map(([kk, t]) => `<span><kbd>${kk}</kbd> ${t}</span>`).join("");
+      hint.replaceChildren(...items.map(([kk, t]) => {
+        const item = document.createElement("span");
+        const cap = document.createElement("kbd");
+        cap.textContent = kk;
+        item.append(cap, " " + t);
+        return item;
+      }));
     }
 
     function reset() {
       M.hist = History();
-      M.base = null;
+      M.anchor = null;
       M.sel = -1;
       M.selecting = false;
     }
@@ -334,11 +469,10 @@
     // ---------- сохранение ----------
     async function save() {
       const c = S.clip;
-      if (!c || S.busy || !active()) return;
+      if (!isVideo() || S.busy || !active() || M.anchor !== null) return;
       const p = pieces();
       if (!p.length || Cuts.total(p) < 0.1) return h.toast("Нечего сохранять", "Все куски убраны — Ctrl+Z вернёт", "error");
       S.busy = true;
-      M.saving = true;
       h.updateExport();
       h.work.start(h.quality().startsWith("discord:") ? "Сжимаю монтаж под размер…" : "Сохраняю монтаж…");
       try {
@@ -347,6 +481,7 @@
           pieces: Cuts.toPairs(p),
           audioKeep: h.audioKeep(c),
           audioGains: h.audioGains(c),
+          mixdown: S.mixdown || S.exportQuality === "discord",
           quality: h.quality(),
         });
         const sub = `${h.fmt(r.duration, 1)} · ${r.pieces} ${plural(r.pieces)} · ${h.mb(r.clip.size)}`;
@@ -359,7 +494,6 @@
         else h.toast("Не удалось сохранить монтаж", String(e), "error");
       } finally {
         S.busy = false;
-        M.saving = false;
         h.updateExport();
       }
     }
@@ -401,6 +535,7 @@
       keys[id] = [e.code];
       store.set("clipback.montageKeys", JSON.stringify(keys));
       stopCapture();
+      renderHint();
       render();
     }
     const resetKeys = $("#montage-keys-reset");
@@ -409,9 +544,11 @@
         keys = Object.fromEntries(ACTIONS.map((a) => [a.id, a.keys.slice()]));
         store.set("clipback.montageKeys", JSON.stringify(keys));
         fillKeys();
+        renderHint();
         render();
       };
     fillKeys();
+    renderHint();
 
     return {
       active: () => active() && isVideo(),
@@ -422,6 +559,7 @@
       render,
       // «Оригинал» у монтажа — не копия без потерь: видео перекодируется с битрейтом исходника
       qualityHint() {
+        if (M.anchor !== null) $("#btn-export").disabled = true;
         if (active() && isVideo() && S.exportQuality === "original") $("#quality-hint").textContent = "Как в оригинале, видео пересобирается видеокартой";
       },
       reset,

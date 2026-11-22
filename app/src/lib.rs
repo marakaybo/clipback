@@ -1223,10 +1223,11 @@ async fn trim_clip(
     audio_keep: Option<Vec<usize>>,
     // громкость каждой дорожки файла (1 — как есть); None — не менялась
     audio_gains: Option<Vec<f32>>,
+    mixdown: Option<bool>,
     quality: Option<String>,
 ) -> Res<clips::TrimOut> {
     export::CANCEL.store(false, std::sync::atomic::Ordering::SeqCst);
-    blocking(move || trim_clip_now(app, path, start, end, replace, audio_keep, audio_gains, quality)).await
+    blocking(move || trim_clip_now(app, path, start, end, replace, audio_keep, audio_gains, mixdown.unwrap_or(false), quality)).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1238,13 +1239,15 @@ fn trim_clip_now(
     replace: bool,
     audio_keep: Option<Vec<usize>>,
     audio_gains: Option<Vec<f32>>,
+    mixdown: bool,
     quality: Option<String>,
 ) -> Res<clips::TrimOut> {
     let p = checked_path(&app, &path)?;
     let q = quality.filter(|q| q != "original");
     storage::ensure_space(&app, storage::trim_expected_for(&p, start, end, q.as_deref()), "отрезок не сохранён")?;
     let mut progress = export::progress(&app);
-    let mut r = clips::trim(&p, start, end, replace, audio_keep.as_deref(), audio_gains.as_deref(), q.as_deref(), &mut progress, &export::CANCEL).map_err(|e| {
+    let audio = clipback_core::media::ExportAudio { keep: audio_keep.as_deref(), gains: audio_gains.as_deref(), mixdown };
+    let mut r = clips::trim(&p, start, end, replace, audio, q.as_deref(), &mut progress, &export::CANCEL).map_err(|e| {
         let e = format!("{e:#}");
         if e != "отменено" {
             log(format!("не удалось сохранить отрезок: {e}"));

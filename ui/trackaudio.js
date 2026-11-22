@@ -68,6 +68,8 @@
     let els = []; // [{ a: <audio>, g: GainNode, index }]
     let clipKey = "", token = 0;
     let active = false, userMuted = video.muted;
+    let pending = "", latest = null, buffering = false;
+    const moving = () => !video.paused && !video.ended && !video.seeking && !buffering && video.readyState >= 3;
 
     const latency = () => (ctx ? (ctx.outputLatency || 0) + (ctx.baseLatency || 0) : 0);
     const muteVideo = () => (video.muted = userMuted || active);
@@ -101,19 +103,19 @@
 
     function sync(force) {
       if (!active) return;
-      const t = video.currentTime, lat = latency();
+      const t = video.currentTime, lat = moving() ? latency() * video.playbackRate : 0;
       for (const e of els) {
         if (e.a.playbackRate !== video.playbackRate) e.a.playbackRate = video.playbackRate;
-        if (e.a.seeking) continue;
-        if (force || TrackAudio.needsSync(t, e.a.currentTime, lat)) e.a.currentTime = t + lat;
+        if (e.a.seeking || e.a.readyState < 1) continue;
+        if (force || TrackAudio.needsSync(t, e.a.currentTime, lat)) e.a.currentTime = Math.min(t + lat, Number.isFinite(e.a.duration) ? e.a.duration : Infinity);
       }
     }
 
     function play() {
-      if (!active) return;
+      if (!active || !moving() || !els.length) return;
       if (ctx.state === "suspended") ctx.resume().catch(() => {});
-      sync(true);
-      for (const e of els) e.a.play().catch(() => {});
+      sync(false);
+      for (const e of els) if (e.a.paused && e.a.readyState >= 1) e.a.play().catch(() => {});
     }
     function pause() {
       for (const e of els) e.a.pause();
@@ -127,13 +129,14 @@
     }
 
     // звук идёт за видео только по событиям — на паузе и в фоне ничего не работает
-    video.addEventListener("play", play);
-    video.addEventListener("playing", play);
+    video.addEventListener("playing", () => { buffering = false; play(); });
+    video.addEventListener("seeking", pause);
+    video.addEventListener("ended", pause);
     video.addEventListener("pause", pause);
-    video.addEventListener("waiting", pause);
+    video.addEventListener("waiting", () => { buffering = true; pause(); });
     video.addEventListener("seeked", () => (video.paused ? sync(true) : play()));
     video.addEventListener("ratechange", () => sync(false));
-    video.addEventListener("timeupdate", () => !video.paused && sync(false));
+    video.addEventListener("timeupdate", () => moving() && sync(false));
     video.addEventListener("volumechange", out);
 
     function gains(tracks) {
@@ -147,53 +150,68 @@
       /// Клип и что играть (TrackAudio.plan). null или native — играет само видео.
       async set(clip, p) {
         const key = clip ? `${clip.path}|${clip.modified}` : "";
-        if (key !== clipKey) {
-          // другой клип: звук прежнего сразу замолкает
-          stop();
-          drop();
-        }
+        latest = p;
         if (!clip || !p || p.native) {
           token++;
-          return stop();
+          pending = "";
+          h.onLoading?.(false);
+          stop();
+          if (key !== clipKey) drop();
+          return;
         }
-        if (key === clipKey) {
+        if (key === pending) return;
+        if (key === clipKey && els.length) {
           gains(p.tracks);
-          if (!active) (active = true), muteVideo(), video.paused || play();
+          if (!active) { active = true; muteVideo(); play(); }
           return;
         }
         const my = ++token;
-        let files;
-        try {
-          files = await h.api.call("preview_tracks", { path: clip.path, tracks: p.tracks.map((t) => t.index) });
-        } catch {
-          return; // не вышло — пусть играет видео как есть
-        }
-        if (my !== token) return;
-        ensureCtx();
-        els = files.map((f, k) => {
-          const a = new Audio();
-          a.crossOrigin = "anonymous";
-          a.preload = "auto";
-          a.src = h.fileUrl(f);
-          const g = ctx.createGain();
-          ctx.createMediaElementSource(a).connect(g).connect(master);
-          return { a, g, index: p.tracks[k].index };
-        });
-        clipKey = key;
-        gains(p.tracks);
-        // видео замолкает, только когда дорожки готовы играть
-        await Promise.all(els.map((e) => new Promise((r) => {
-          if (e.a.readyState >= 3) return r();
-          e.a.addEventListener("canplay", r, { once: true });
-          e.a.addEventListener("error", r, { once: true });
-          setTimeout(r, 3000);
-        })));
-        if (my !== token) return;
+        pending = key;
+        h.onLoading?.(true);
+        drop();
         active = true;
         muteVideo();
-        out();
-        if (video.paused) sync(true);
-        else play();
+        const fail = (error) => {
+          if (my !== token) return;
+          token++;
+          drop();
+          pending = "";
+          h.onLoading?.(false);
+          h.onError?.(String(error));
+        };
+        try {
+          const indices = p.tracks.map((t) => t.index);
+          const files = await h.api.call("preview_tracks", { path: clip.path, tracks: indices });
+          if (my !== token) return;
+          if (files.length !== indices.length) throw Error("Не все дорожки доступны");
+          ensureCtx();
+          files.forEach((f, k) => {
+            const a = new Audio();
+            a.crossOrigin = "anonymous";
+            a.preload = "auto";
+            const g = ctx.createGain();
+            ctx.createMediaElementSource(a).connect(g).connect(master);
+            els.push({ a, g, index: indices[k] });
+            // Each decoder can initially buffer, or stall after a seek. Align it
+            // to the current video position when it can actually play again.
+            a.addEventListener("canplay", () => {
+              if (els.some((entry) => entry.a === a)) play();
+            });
+            a.addEventListener("error", () => {
+              if (els.some((entry) => entry.a === a)) fail("Не удалось прочитать дорожку");
+            });
+            a.src = h.fileUrl(f);
+          });
+          clipKey = key;
+          pending = "";
+          h.onLoading?.(false);
+          gains(latest.tracks);
+          out();
+          if (moving()) play();
+          else sync(true);
+        } catch (error) {
+          fail(error);
+        }
       },
       muted: () => userMuted,
       setMuted(m) {
@@ -206,6 +224,6 @@
     };
   }
 
-  if (typeof module !== "undefined" && module.exports) module.exports = { TrackAudio };
+  if (typeof module !== "undefined" && module.exports) module.exports = { TrackAudio, create };
   else window.TrackAudio = Object.assign(TrackAudio, { create });
 })();

@@ -4,7 +4,7 @@
 
 use crate::capture::{texture_desc, Duplicator, Frame};
 use crate::convert::{create_frame_texture, Converter};
-use crate::encoder::{Encoder, EncoderSettings};
+use crate::encoder::{frame_pts, Encoder, EncoderSettings};
 use crate::gpu::{self, Gpu};
 use crate::audio_watch::AudioWatch;
 use crate::mixer::{self, AudioConfig};
@@ -185,6 +185,22 @@ fn run(cfg: Config, rx: Receiver<Command>, events: Sender<Event>) -> Result<()> 
     r
 }
 
+/// Last frame boundary at or before this time. Inverts frame_pts even at a
+/// fractional boundary truncated to 100 ns.
+fn frame_slot(elapsed: i64, fps: u32) -> i64 {
+    (((i128::from(elapsed.max(0)) + 1) * i128::from(fps) - 1) / 10_000_000) as i64
+}
+
+/// Keep the existing half-second catch-up window. Only a larger stall causes
+/// a jump. A fresh desktop image from after that stall cannot fill the gap.
+fn after_stall(scheduled: i64, current: i64, fps: u32) -> bool {
+    current - (scheduled + 1) > i64::from(fps) / 2
+}
+
+fn picture_slot(scheduled: i64, presented: i64, fps: u32) -> i64 {
+    if after_stall(scheduled, presented, fps) { presented } else { scheduled }
+}
+
 fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) -> Result<()> {
     let g = gpu::open(cfg.monitor)?;
     let mut dup = Duplicator::new(&g.device, &g.output)?;
@@ -213,8 +229,7 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
     )?;
     let mut ring = Ring::new(cfg.buffer_secs);
 
-    // видео и звук считают время от одной точки: start (Instant) и t0 (QPC) — один момент
-    let start = Instant::now();
+    // One QPC epoch for WASAPI packets, DXGI presents and output deadlines.
     let t0 = crate::audio::qpc_now();
     let (atx, arx) = mpsc::channel();
     let (mut hub, audio_error) = match mixer::start(&cfg.audio, t0, atx.clone()) {
@@ -255,7 +270,8 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
     let mut health = Health::new();
 
     let frame_ns = 1_000_000_000u64 / fps as u64;
-    let mut idx: i64 = 0;
+    let mut idx = 0i64;
+    let mut image_slot = 0;
     let mut have_frame = false;
     let mut pool_i = 0;
     let (mut encoded, mut dropped) = (0u64, 0u64);
@@ -383,13 +399,13 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
             ring.push_audio_arc(k, p);
         }
 
-        let due = start + Duration::from_nanos(idx as u64 * frame_ns);
-        let now = Instant::now();
+        let due = t0 + frame_pts(idx, fps);
+        let remaining = due - crate::audio::qpc_now();
         // Игра может рисовать сотни кадров в секунду, а видео нужно 30–60. Поэтому за интервал
         // копируем один кадр экрана — первый новый — и сразу его отпускаем: кадр, который
         // держит Clipback, Windows не может обновлять, а копировать каждый — лишняя работа видеокарте.
-        if !copied && now + Duration::from_micros(800) < due {
-            let wait_ms = (((due - now).as_micros() + 999) / 1000).clamp(1, 100) as u32;
+        if !copied && remaining > 8_000 {
+            let wait_ms = ((remaining + 9_999) / 10_000).clamp(1, 100) as u32;
             let t_acq = Instant::now();
             let got = dup.acquire(wait_ms)?;
             dbg.acquire_ms += t_acq.elapsed().as_secs_f64() * 1000.0;
@@ -428,6 +444,7 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
                     }
                     unsafe { g.context.CopyResource(&pipe.frame, &tex) };
                     dup.release();
+                    image_slot = frame_slot(crate::audio::qpc_to_100ns(dup.present_qpc) - t0, fps);
                     copied = true;
                     have_frame = true;
                     frame_dirty = true;
@@ -494,12 +511,14 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
                 health = Health::new();
             }
         }
-        if now < due {
+        let remaining = due - crate::audio::qpc_now();
+        if remaining > 0 {
             // кадр уже скопирован (или осталась доля миллисекунды) — дожидаемся момента выдачи
-            std::thread::sleep(due - now);
+            std::thread::sleep(Duration::from_nanos(remaining as u64 * 100));
             continue;
         }
         copied = false;
+        let mut output_slot = idx;
 
         // пора выдать очередной кадр (если экран не менялся — повторяем последний).
         // Запрос кадра от кодировщика мог прийти, пока ждали экран, — проверяем ещё раз
@@ -529,23 +548,28 @@ fn capture_loop(cfg: &Config, rx: &Receiver<Command>, events: &Sender<Event>) ->
             }
             let (tex, view) = &pipe.pool[pool_i];
             pipe.conv.convert(view)?;
-            enc.push(tex, idx)?;
+            // If acquisition crossed a long stall, date the new surface by
+            // its DXGI present. An old or repeated surface keeps its slot.
+            output_slot = picture_slot(idx, image_slot, fps);
+            enc.push(tex, output_slot)?;
             pool_i = (pool_i + 1) % POOL;
             encoded += 1;
         } else if have_frame {
             dropped += 1;
             dbg.enc_busy += 1;
         }
-        let late = Instant::now().saturating_duration_since(due).as_secs_f64() * 1000.0;
+        let now = crate::audio::qpc_now();
+        let late = (now - due).max(0) as f64 / 10_000.0;
         dbg.late_ms = dbg.late_ms.max(late);
-        idx += 1;
-
-        // сильно отстали (система подвисла) — пропускаем, а не догоняем рывком
-        let should = (start.elapsed().as_nanos() / frame_ns as u128) as i64;
-        if should - idx > fps as i64 / 2 {
-            dbg.skipped += (should - idx) as u64;
-            dropped += (should - idx) as u64;
-            idx = should;
+        let current = frame_slot(now - t0, fps);
+        if after_stall(idx, current, fps) {
+            let next = current.max(output_slot + 1);
+            let skipped = (next - idx - 1) as u64;
+            dbg.skipped += skipped;
+            dropped += skipped;
+            idx = next;
+        } else {
+            idx += 1;
         }
 
         if last_status.elapsed() >= Duration::from_secs(2) {
@@ -630,6 +654,10 @@ struct Dbg {
     acquire_ms: f64,
     late_ms: f64,
 }
+
+#[cfg(test)]
+#[path = "tests/recording_sync.rs"]
+mod recording_sync;
 
 #[cfg(test)]
 mod tests {

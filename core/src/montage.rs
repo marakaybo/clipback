@@ -10,7 +10,7 @@
 use crate::aac::AudioPacket;
 use crate::convert::Converter;
 use crate::encoder::{Encoder, EncoderSettings, Packet};
-use crate::media::{self, MfScope, Quality};
+use crate::media::{self, ExportAudio, MfScope, Quality};
 use crate::mux::{self, AudioInput, Writer, TIMESCALE};
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
@@ -146,6 +146,13 @@ pub fn montage(
     progress: &mut dyn FnMut(f64),
     cancel: &AtomicBool,
 ) -> Result<MontageOut> {
+    montage_with_audio(src, dst, ranges, ExportAudio { keep: audio_keep, gains: audio_gains, mixdown: false }, q, progress, cancel)
+}
+
+pub fn montage_with_audio(
+    src: &Path, dst: &Path, ranges: &[(f64, f64)], audio: ExportAudio<'_>, q: &Quality,
+    progress: &mut dyn FnMut(f64), cancel: &AtomicBool,
+) -> Result<MontageOut> {
     let (times, end) = frame_times(src)?;
     let pieces = plan(&times, end, ranges);
     if pieces.is_empty() {
@@ -156,7 +163,8 @@ pub fn montage(
     let fast = dst.with_extension("fs.part");
     let r = (|| {
         let _mf = MfScope::new()?;
-        let (tracks, names) = build_audio(src, &pieces, &info.audio_names, audio_keep, audio_gains, &mut |f| progress(f * 0.1), cancel)?;
+        let indices = audio.indices(&info.audio_names);
+        let (tracks, names) = build_audio(src, &pieces, &info.audio_names, &audio, &indices, &mut |f| progress(f * 0.1), cancel)?;
         encode_video(src, &part, &pieces, &info, tracks, &names, q, &mut |f| progress(0.1 + f * 0.85), cancel)?;
         check(cancel)?;
         faststart(&part, &fast)?;
@@ -196,28 +204,25 @@ fn unchanged(g: f32) -> bool {
 }
 
 /// Звуковые дорожки монтажа: кадры AAC с позициями от начала готового видео и их названия.
-fn build_audio(
+pub(crate) fn build_audio(
     src: &Path,
     pieces: &[Piece],
     names: &[String],
-    keep: Option<&[usize]>,
-    gains: Option<&[f32]>,
+    audio: &ExportAudio<'_>,
+    keep: &[usize],
     progress: &mut dyn FnMut(f64),
     cancel: &AtomicBool,
 ) -> Result<(Vec<Vec<Arc<AudioPacket>>>, Vec<String>)> {
-    let keep: Vec<usize> = match keep {
-        Some(k) => k.iter().copied().filter(|&i| i < names.len()).collect(),
-        None => (0..names.len()).collect(),
-    };
     if keep.is_empty() {
         return Ok((Vec::new(), Vec::new()));
     }
-    let gain = |i: usize| gains.and_then(|g| g.get(i)).copied().unwrap_or(1.0).clamp(0.0, 4.0);
+    let gain = |i| audio.gain(i);
     // «Всё вместе» сводится заново (с выравниванием голоса), если громкость системы,
     // микрофона или её самой менялась, или клип записан до выравнивания
     let remix = if keep.contains(&0) { media::remix_needed(src, names, &gain) } else { None };
-    let mut need = keep.clone();
+    let mut need = keep.to_vec();
     if let Some((s, m)) = remix {
+        need.retain(|&i| i != 0);
         for i in [s, m] {
             if !need.contains(&i) {
                 need.push(i);
@@ -227,8 +232,10 @@ fn build_audio(
 
     // уровни голоса и игры меряются по первому куску (до 20 с) — дальше выравнивание подстраивается
     let mut voice: Option<crate::voicemix::VoiceMix> = None;
-    let mut encs = keep.iter().map(|_| crate::aac::AacEncoder::new()).collect::<Result<Vec<_>>>()?;
-    let mut out: Vec<Vec<AudioPacket>> = keep.iter().map(|_| Vec::new()).collect();
+    let sum_sources = audio.mixdown && keep.len() > 1;
+    let out_names = if sum_sources { vec![mux::MIX.to_owned()] } else { keep.iter().map(|&i| names[i].clone()).collect() };
+    let mut encs = out_names.iter().map(|_| crate::aac::AacEncoder::new()).collect::<Result<Vec<_>>>()?;
+    let mut out: Vec<Vec<AudioPacket>> = out_names.iter().map(|_| Vec::new()).collect();
     let all = total(pieces).max(1);
     let pre = samples_at(PRE);
     for p in pieces {
@@ -245,8 +252,19 @@ fn build_audio(
                 let (p0, v) = media::decode_track(&tracks[k])?;
                 pcm[i] = Some(take(p0, &v, pre, n));
             }
-            for (j, &i) in keep.iter().enumerate() {
+            for ((enc, packets), &i) in encs.iter_mut().zip(&mut out).zip(keep) {
                 let buf = match remix {
+                    _ if sum_sources => {
+                        let mut mix = vec![0.0; n * 2];
+                        for &source in keep {
+                            let g = gain(source);
+                            for (sum, sample) in mix.iter_mut().zip(pcm[source].as_ref().unwrap()) {
+                                *sum += sample * g;
+                            }
+                        }
+                        mix.iter_mut().for_each(|x| *x = crate::mixer::soft_clip(*x));
+                        mix
+                    }
                     Some((s, m)) if i == 0 => {
                         let (a, b) = (pcm[s].as_ref().unwrap(), pcm[m].as_ref().unwrap());
                         let vm = voice.get_or_insert_with(|| crate::voicemix::VoiceMix::primed(a, b));
@@ -268,7 +286,7 @@ fn build_audio(
                         }
                     }
                 };
-                encs[j].encode(pos, &buf, &mut out[j])?;
+                enc.encode(pos, &buf, packets)?;
             }
             progress((os + (ce - cs)) as f64 / all as f64);
             cs = ce;
@@ -280,7 +298,7 @@ fn build_audio(
         enc.encode(end, &vec![0.0; crate::aac::FRAME as usize * 2 * 4], o)?;
     }
     let tracks = out.into_iter().map(|v| v.into_iter().map(Arc::new).collect()).collect();
-    Ok((tracks, keep.iter().map(|&i| names[i].clone()).collect()))
+    Ok((tracks, out_names))
 }
 
 // ---------- видео ----------

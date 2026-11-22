@@ -1,6 +1,7 @@
 //! Клипы и скриншоты в папке сохранения.
 
 use anyhow::{bail, Context, Result};
+use clipback_core::media::{transcode_with_audio, ExportAudio, Quality};
 use clipback_core::{mux, shot, util};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -250,8 +251,7 @@ pub fn trim(
     start: f64,
     end: f64,
     replace: bool,
-    audio_keep: Option<&[usize]>,
-    audio_gains: Option<&[f32]>,
+    audio: ExportAudio<'_>,
     quality: Option<&str>,
     progress: &mut dyn FnMut(f64),
     cancel: &AtomicBool,
@@ -265,11 +265,11 @@ pub fn trim(
     };
     // «discord:20» — уложить в 20 МБ
     if let Some(mb) = quality.and_then(|q| q.strip_prefix("discord:")).and_then(|v| v.parse::<u64>().ok()) {
-        return trim_to_size(p, &dst, start, end, audio_keep, audio_gains, mb.clamp(1, 10_000) * 1_000_000, progress, cancel);
+        return trim_to_size(p, &dst, start, end, ExportAudio { mixdown: true, ..audio }, mb.clamp(1, 10_000) * 1_000_000, progress, cancel);
     }
-    let r = match quality.and_then(clipback_core::media::Quality::preset) {
-        Some(q) => clipback_core::media::transcode(p, &dst, start, end, audio_keep, audio_gains, &q, progress, cancel)?,
-        None => mux::trim_tracks_with(p, &dst, start, end, audio_keep, audio_gains, progress, cancel)?,
+    let r = match quality.and_then(Quality::preset) {
+        Some(q) => transcode_with_audio(p, &dst, start, end, audio, &q, progress, cancel)?,
+        None => mux::trim_with_audio(p, &dst, start, end, audio, progress, cancel)?,
     };
     Ok(TrimOut { clip: entry(&dst)?, start: r.start, end: r.end })
 }
@@ -282,32 +282,34 @@ fn trim_to_size(
     dst: &Path,
     start: f64,
     end: f64,
-    audio_keep: Option<&[usize]>,
-    audio_gains: Option<&[f32]>,
+    audio: ExportAudio<'_>,
     limit: u64,
     progress: &mut dyn FnMut(f64),
     cancel: &AtomicBool,
 ) -> Result<TrimOut> {
-    use clipback_core::media::{transcode, Quality};
     let info = mux::clip_info(p)?;
-    let keep: Vec<usize> = match audio_keep {
-        Some(k) => k.iter().copied().take(1).collect(),
-        None => (info.audio_tracks > 0).then_some(0).into_iter().collect(),
-    };
+    let tracks = audio.track_count(&info.audio_names);
     let secs = end.min(info.duration) - start;
-    let mut squeeze = 1.0;
-    for attempt in 0..3 {
-        let q = Quality::for_size(limit, secs, keep.len(), squeeze)?;
-        // повторная попытка (кодировщик превысил размер) идёт по шкале заново
-        let r = transcode(p, dst, start, end, Some(&keep), audio_gains, &q, progress, cancel)?;
-        let size = std::fs::metadata(dst).map(|m| m.len()).unwrap_or(0);
-        if size <= limit || attempt == 2 {
-            return Ok(TrimOut { clip: entry(dst)?, start: r.start, end: r.end });
+    // A retry must read the same source tracks even when replacing the original.
+    let tmp = dst.with_extension("size.tmp");
+    let result = (|| {
+        let mut squeeze = 1.0;
+        for attempt in 0..3 {
+            let q = Quality::for_size(limit, secs, tracks, squeeze)?;
+            let r = transcode_with_audio(p, &tmp, start, end, audio, &q, progress, cancel)?;
+            let size = std::fs::metadata(&tmp)?.len();
+            if size <= limit || attempt == 2 {
+                mux::finish(&tmp, dst, Ok(()))?;
+                return Ok(TrimOut { clip: entry(dst)?, start: r.start, end: r.end });
+            }
+            squeeze *= limit as f64 / size as f64 * 0.95;
         }
-        // кодировщик превысил битрейт — ужимаем пропорционально и пробуем ещё раз
-        squeeze *= limit as f64 / size as f64 * 0.95;
+        unreachable!()
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(tmp);
     }
-    unreachable!()
+    result
 }
 
 /// Сохранить картинку (PNG или JPEG — формат определяется по данным).

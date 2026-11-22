@@ -136,6 +136,7 @@ function main() {
     trackOn: {},
     // громкость дорожек в сохранённом отрезке, %: { номер: 0…200 } (нет — 100)
     trackVol: {},
+    mixdown: false,
     mics: null,
     apps: null,
     exportQuality: "original",
@@ -707,12 +708,12 @@ function main() {
   /// В другие программы уходит копия с одной дорожкой: Discord и плееры играют только первую.
   async function dragClip(c, icon) {
     let path = c.path;
-    if (multiTrack(c)) {
+    if (multiTrack(c) || (c === S.clip && c.kind === "video" && (audioKeep(c) || audioGains(c)))) {
       if (S.busy) return toast("Подождите", "Идёт сохранение — перетащите клип, когда оно закончится", "info");
       S.busy = true;
       work.start("Готовлю файл с одной дорожкой…");
       try {
-        path = await api.call("share_copy", { path: c.path, audioGains: c === S.clip ? audioGains(c) : null });
+        path = await api.call("share_copy", { path: c.path, audioKeep: c === S.clip ? audioKeep(c) : null, audioGains: c === S.clip ? audioGains(c) : null });
       } catch (e) {
         if (!cancelled(e)) toast("Не получилось подготовить файл", String(e), "error");
         return;
@@ -876,7 +877,11 @@ function main() {
   const stage = $("#stage");
   video.crossOrigin = "anonymous";
   // звук по дорожкам: выключенные и приглушённые дорожки слышны и в плеере (ui/trackaudio.js)
-  const trackAudio = TrackAudio.create(video, { api, fileUrl: api.fileUrl });
+  const trackAudio = TrackAudio.create(video, {
+    api, fileUrl: api.fileUrl,
+    onLoading: (loading) => { $("#audio-preparing").hidden = !loading; },
+    onError: (message) => toast("Дорожки не загрузились", message, "error"),
+  });
 
   function mediaUrl(c) {
     // ?v= — чтобы после обрезки «на месте» плеер не показал старую версию файла
@@ -1341,13 +1346,15 @@ function main() {
       }
       const name = document.createElement("label");
       name.className = "tname";
-      name.title = "Выключенная дорожка не попадёт в отрезок";
+      name.title = trackNames(c).includes("Звук системы") && !["Звук системы", "Микрофон"].includes(t.name)
+        ? "Отдельная дорожка приложения. В общем звуке приложение уже слышно через систему."
+        : "Включить в просмотр и сохранение";
       name.innerHTML = `<span class="switch xs"><input type="checkbox"><span></span></span><span></span>`;
       name.lastChild.textContent = t.name;
       const cb = name.querySelector("input");
       cb.checked = isOn(t.index);
       cb.addEventListener("change", () => {
-        S.trackOn[t.index] = cb.checked;
+        S.trackOn = { ...S.trackOn, [t.index]: cb.checked };
         row.classList.toggle("off", !cb.checked);
         updateExport();
         playTracks();
@@ -1366,6 +1373,7 @@ function main() {
         val.textContent = `${volOf(t.index)} %`;
         vol.classList.toggle("changed", volOf(t.index) !== 100);
       };
+      range.setAttribute("aria-label", "Громкость: " + t.name);
       range.value = volOf(t.index);
       show();
       const set = (v) => {
@@ -1477,7 +1485,40 @@ function main() {
     const h = video >= 8e6 ? 1440 : video >= 4e6 ? 1080 : video >= 1.8e6 ? 720 : video >= 9e5 ? 540 : 480;
     return { ok: true, h, video };
   }
-  const exportTracks = (c) => Math.min(1, c.audioTracks || 0);
+  const exportTracks = (c) => Math.min(1, audioKeep(c)?.length ?? c.audioTracks ?? 0);
+
+  const ruPlural = new Intl.PluralRules("ru");
+  const trackCountText = (n) => n + " " + ({ one: "дорожка", few: "дорожки", many: "дорожек" }[ruPlural.select(n)] || "дорожек");
+  let soundDisplay;
+  function renderExportSound(c) {
+    if (soundDisplay && soundDisplay.clip === c && soundDisplay.on === S.trackOn && soundDisplay.quality === S.exportQuality &&
+        soundDisplay.mixdown === S.mixdown && soundDisplay.busy === S.busy) return;
+    soundDisplay = { clip: c, on: S.trackOn, quality: S.exportQuality, mixdown: S.mixdown, busy: S.busy };
+    const selected = audioKeep(c);
+    const names = trackNames(c).filter((_, index) => !selected || selected.includes(index));
+    const discord = S.exportQuality === "discord";
+    const single = discord || S.mixdown;
+    for (const button of $$("#sound-export-mode button")) {
+      const active = (button.dataset.mode === "mix") === single;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", String(active));
+      button.disabled = S.busy || discord || !c.audioTracks;
+    }
+    const n = names.length;
+    const summary = !n ? "Файл без звука" : single
+      ? (discord ? "Для Discord · 1 звуковая дорожка" : "1 звуковая дорожка")
+      : trackCountText(n);
+    // The system track already contains application sound.
+    const sources = names.includes("Звук системы")
+      ? names.filter((name) => name === "Звук системы" || name === "Микрофон")
+      : names;
+    $("#sound-export-result").textContent = !n ? summary : single
+      ? summary + " · " + sources.join(" + ")
+      : summary + " · " + names.join(", ");
+  }
+  for (const button of $$("#sound-export-mode button")) {
+    button.onclick = () => { S.mixdown = button.dataset.mode === "mix"; updateExport(); };
+  }
 
   function qualityOut(c, q) {
     const p = QUALITY[q];
@@ -1502,7 +1543,7 @@ function main() {
       if (document.activeElement !== own) own.value = [10, 20, 50, 500].includes(S.discordMb) ? "" : S.discordMb;
       own.placeholder = "своё";
       if (!c) return (hint.textContent = "");
-      const f = sizeFit(S.outT - S.inT, S.discordMb, exportTracks(c));
+      const f = sizeFit(mt.active() ? mt.total() : S.outT - S.inT, S.discordMb, exportTracks(c));
       if (!f.ok) {
         hint.classList.add("warn");
         hint.textContent = `Не влезет в ${S.discordMb} МБ — максимум ${f.maxSecs} с.`;
@@ -1546,18 +1587,18 @@ function main() {
       return f.ok ? Math.min(S.discordMb * 1e6 * 0.92, (f.video / 8 + 20000 * exportTracks(c)) * len) : S.discordMb * 1e6;
     }
     if (S.exportQuality === "original" || !QUALITY[S.exportQuality]) return c.duration > 0 ? (c.size / c.duration) * len : 0;
-    const keep = audioKeep(c);
-    const tracks = keep ? keep.length : c.audioTracks || 0;
+    const tracks = S.mixdown ? exportTracks(c) : audioKeep(c)?.length ?? (c.audioTracks || 0);
     return (qualityOut(c, S.exportQuality).bitrate / 8 + tracks * 20000) * len;
   }
 
   function updateExport() {
     const c = S.clip;
     if (!c || c.kind !== "video") return;
+    renderExportSound(c);
     const len = mt.active() ? mt.total() : S.outT - S.inT;
     $("#est-len").textContent = fmt(len, 1);
     $("#est-size").textContent = c.duration > 0 ? mb(estimateSize(c, len)) : "—";
-    const whole = !mt.active() && S.inT <= 0.01 && S.outT >= c.duration - 0.01 && audioKeep(c) === null && audioGains(c) === null && S.exportQuality === "original";
+    const whole = !(S.mixdown && multiTrack(c)) && !mt.active() && S.inT <= 0.01 && S.outT >= c.duration - 0.01 && audioKeep(c) === null && audioGains(c) === null && S.exportQuality === "original";
     const tooLong = S.exportQuality === "discord" && !sizeFit(len, S.discordMb, exportTracks(c)).ok;
     $("#btn-export").disabled = S.busy || whole || tooLong || (mt.active() && len < 0.1);
     if (S.exportQuality === "discord") renderQuality(); // подсказка зависит от длины отрезка
@@ -1600,6 +1641,7 @@ function main() {
         start: S.inT,
         end: S.outT,
         replace,
+        mixdown: S.mixdown || S.exportQuality === "discord",
         audioKeep: audioKeep(c),
         audioGains: audioGains(c),
         quality: S.exportQuality === "discord" ? `discord:${S.discordMb}` : S.exportQuality,
@@ -1723,11 +1765,11 @@ function main() {
   $("#btn-copy").onclick = async () => {
     const c = S.clip;
     if (!c || S.busy) return;
-    const one = multiTrack(c);
+    const one = multiTrack(c) || (c.kind === "video" && (audioKeep(c) !== null || audioGains(c) !== null));
     S.busy = true;
     if (one) work.start("Готовлю файл с одной дорожкой…");
     try {
-      await api.call("copy_clip", { path: c.path, audioGains: c === S.clip ? audioGains(c) : null });
+      await api.call("copy_clip", { path: c.path, audioKeep: c === S.clip ? audioKeep(c) : null, audioGains: c === S.clip ? audioGains(c) : null });
       work.fail(); // для копирования «Готово» не нужно — скажет уведомление
       toast("Файл скопирован", one ? "Голос и игра на одной дорожке — вставьте через Ctrl+V в Discord или Telegram" : "Вставьте его в Discord или Telegram через Ctrl+V", "copy");
     } catch (e) {
@@ -1754,7 +1796,7 @@ function main() {
     work.start(list.length === 1 ? "Делаю копию с одной дорожкой…" : `Делаю копии с одной дорожкой (${list.length})…`);
     try {
       const single = list.length === 1 && list[0] === S.clip;
-      const r = await api.call("one_track_clips", { paths: list.map((c) => c.path), audioGains: single ? audioGains(list[0]) : null });
+      const r = await api.call("one_track_clips", { paths: list.map((c) => c.path), audioKeep: single ? audioKeep(list[0]) : null, audioGains: single ? audioGains(list[0]) : null });
       const sub = r.length === 1 ? `${clipTitle(r[0])} · ${mb(r[0].size)}` : `${r.length} шт. рядом с оригиналами`;
       if (!work.done(sub, r[0].path)) toast("Копия с одной дорожкой готова", sub, "check");
       S.picked.clear();
@@ -1984,10 +2026,12 @@ function main() {
 
     // звук
     $$("#set-audio-mode .seg-btn").forEach((b) => b.classList.toggle("active", b.dataset.v === s.audioMode));
-    $("#audio-mode-hint").textContent =
-      s.audioMode === "advanced"
-        ? "Звук системы, микрофон и отдельные дорожки выбранных приложений"
-        : "Две дорожки: весь звук компьютера и микрофон";
+    const recorded = [];
+    if (s.systemAudio && s.mic) recorded.push("Всё вместе");
+    if (s.systemAudio) recorded.push("Звук системы");
+    if (s.mic) recorded.push("Микрофон");
+    if (s.audioMode === "advanced") recorded.push(...(s.appTracks || []).filter((t) => t.enabled && t.exe).map((t) => t.name || t.exe));
+    $("#audio-mode-hint").textContent = recorded.length ? "В записи: " + trackCountText(recorded.length) + " · " + recorded.join(", ") : "Запись без звука";
     $("#apps-section").hidden = s.audioMode !== "advanced";
     $("#set-system-audio").checked = s.systemAudio;
     $("#set-mic").checked = s.mic;

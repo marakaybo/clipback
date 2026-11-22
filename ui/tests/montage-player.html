@@ -1,0 +1,109 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Montage player test</title>
+<!-- Isolated browser fixture. Only montage.js runs and all export calls stay in memory. -->
+<link rel="stylesheet" href="../styles.css">
+<link rel="stylesheet" href="../montage.css">
+<div id="tl" class="tl"><div id="playhead"></div></div>
+<span id="sel-len"></span><span id="sel-range"></span>
+<button id="btn-reset">Весь клип</button><div id="settings"></div>
+<div id="export"><div class="panel-head"><span></span></div>
+  <div id="quality-hint"></div><button id="btn-export">Сохранить отрезок</button>
+</div>
+<output id="result">Running</output>
+<script src="../montage.js"></script>
+<script>
+async function test() {
+  const $ = (selector) => document.querySelector(selector);
+  const click = (selector) => $(selector).click();
+  const equal = (actual, expected, message) => {
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+      throw Error(message + " — got " + JSON.stringify(actual));
+    }
+  };
+  const S = {
+    clip: { kind: "video", duration: 60, fps: 60, path: "fixture.mp4" },
+    t: 5, inT: 5, outT: 55, mixdown: false, exportQuality: "original",
+  };
+  const calls = [];
+  function updateExport() {
+    $("#btn-export").disabled = S.busy || (mt.active() && mt.total() < 0.1);
+    mt.qualityHint();
+  }
+  function updateAll() { mt.render(); updateExport(); }
+  function seek(t) { S.t = t; updateAll(); }
+  $("#btn-reset").onclick = () => { S.inT = 0; S.outT = 60; updateAll(); };
+  const mt = Montage.create({
+    S, $, tl: $("#tl"), updateAll, updateExport, seek, setPlaying: (on) => { S.playing = on; },
+    renderQuality() {}, fmt: (s, decimals) => s.toFixed(decimals),
+    audioKeep: () => [1, 2], audioGains: () => [0.8, 1], mb: () => "1 МБ",
+    quality: () => S.exportQuality === "discord" ? "discord:10" : S.exportQuality,
+    work: { start() {}, done: () => true },
+    api: { async call(command, args) {
+      calls.push({ command, ...args });
+      return { clip: { path: "result.mp4", size: 100 }, pieces: 3, duration: 35 };
+    } },
+    loadClips() {},
+  });
+  const mark = (t) => { seek(t); click(".mt-range"); };
+  const rows = () => Array.from(document.querySelectorAll(".mt-preview li"), (li) => li.textContent);
+  const key = (code) => mt.key(new KeyboardEvent("keydown", { code, key: code }));
+  updateAll();
+  key("KeyV");
+  equal(mt.active(), false, "split at trim boundary is a no-op");
+  S.playing = true;
+  mark(15);
+  equal(S.playing, false, "marking pauses at the chosen edge");
+  equal($(".mt-range").disabled, true, "a point cannot be removed");
+  equal(key("Delete"), true, "draft consumes library Delete");
+  mark(20);
+  mark(40);
+  mark(30);
+  const retained = ["5.00 – 15.00", "20.00 – 30.00", "40.00 – 55.00"];
+  equal(rows(), retained, "reverse second removal keeps three source intervals in order");
+  equal($(".mt-count").textContent, "3 куска · 35.00", "export count and total");
+  const firstRow = $(".mt-preview li");
+  seek(24);
+  equal($(".mt-preview li") === firstRow, true, "scrubbing preserves the export list");
+  click(".mt-undo");
+  equal(mt.total(), 45, "one click undoes one removal");
+  click(".mt-redo");
+  equal(rows(), retained, "redo restores all intervals");
+  mark(16);
+  seek(18);
+  equal($(".mt-range").disabled, true, "cannot remove an existing gap");
+  equal($("#btn-export").disabled, true, "pending cut blocks export");
+  await mt.save();
+  equal(calls.length, 0, "no export request during a draft");
+  click(".mt-cancel");
+  equal($("#btn-export").disabled, false, "cancel restores export availability");
+  mark(0);
+  mark(60);
+  equal([mt.total(), rows().length, $("#btn-export").disabled], [0, 0, true], "empty montage");
+  click(".mt-undo");
+  equal(rows(), retained, "undo restores an empty montage");
+  for (const [quality, mixdown, expected] of [["original", false, false], ["original", true, true], ["discord", false, true]]) {
+    S.exportQuality = quality;
+    S.mixdown = mixdown;
+    await mt.save();
+    equal(calls.at(-1), {
+      command: "montage_clip", path: "fixture.mp4", pieces: [[5, 15], [20, 30], [40, 55]],
+      audioKeep: [1, 2], audioGains: [0.8, 1], mixdown: expected,
+      quality: quality === "discord" ? "discord:10" : quality,
+    }, "export uses retained pieces and requested mixdown");
+  }
+  click("#btn-reset");
+  equal(mt.active(), false, "whole clip leaves montage");
+  click(".mt-undo");
+  equal(rows(), retained, "whole clip is reversible");
+  click(".mt-undo");
+  click(".mt-undo");
+  equal([mt.active(), S.inT, S.outT], [false, 5, 55], "first undo restores the initial trim");
+  mark(20);
+  mt.reset();
+  updateAll();
+  equal([$(".mt-draft").hidden, $(".mt-redo").hidden, $(".mt-undo").disabled], [true, true, true], "new clip clears draft and history");
+}
+test().then(() => document.querySelector("#result").textContent = "PASS")
+  .catch((err) => document.querySelector("#result").textContent = err.stack);
+</script>

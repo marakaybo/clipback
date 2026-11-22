@@ -2,6 +2,7 @@
 
 use crate::aac::AudioPacket;
 use crate::encoder::Packet;
+use crate::media::ExportAudio;
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use mp4::{
@@ -228,7 +229,8 @@ pub fn write_av_named(path: &Path, packets: &[Arc<Packet>], audio: &[AudioInput]
     finish(&tmp, path, r)
 }
 
-pub(crate) fn finish(tmp: &Path, path: &Path, r: Result<()>) -> Result<()> {
+/// Publish a finished temporary MP4, retrying while another process has it open.
+pub fn finish(tmp: &Path, path: &Path, r: Result<()>) -> Result<()> {
     if let Err(e) = r {
         let _ = std::fs::remove_file(tmp);
         return Err(e);
@@ -564,6 +566,13 @@ pub fn trim_tracks_with(
     progress: &mut dyn FnMut(f64),
     cancel: &AtomicBool,
 ) -> Result<TrimResult> {
+    trim_with_audio(src, dst, start, end, ExportAudio { keep: audio_keep, gains: audio_gains, mixdown: false }, progress, cancel)
+}
+
+pub fn trim_with_audio(
+    src: &Path, dst: &Path, start: f64, end: f64, selection: ExportAudio<'_>,
+    progress: &mut dyn FnMut(f64), cancel: &AtomicBool,
+) -> Result<TrimResult> {
     if end <= start {
         bail!("конец отрезка раньше начала");
     }
@@ -606,25 +615,23 @@ pub fn trim_tracks_with(
     // звуковые дорожки: какие оставить и какие их кадры попадают в отрезок
     let all_audio = audio_track_ids(&r);
     let src_names = read_track_names(src).filter(|v| v.len() == all_audio.len()).unwrap_or_else(|| default_track_names(all_audio.len()));
-    let keep_idx: Vec<usize> = match audio_keep {
-        Some(k) => k.iter().copied().filter(|&i| i < all_audio.len()).collect(),
-        None => (0..all_audio.len()).collect(),
-    };
-    let keep: Vec<u32> = keep_idx.iter().map(|&i| all_audio[i]).collect();
+    let keep_idx = selection.indices(&src_names);
     let mut kept_names: Vec<String> = Vec::new();
     let mut audio = Vec::new();
     // громкость дорожек менялась: звук перекодируется, видео по-прежнему копируется как есть
     let mut regained: Vec<Vec<(i64, Bytes)>> = Vec::new();
     // доля звука в ходе работы: перекодирование звука дольше копирования кадров
-    let audio_share = if crate::media::audio_rework(src, audio_keep, audio_gains) { 0.6 } else { 0.0 };
+    let audio_share = if selection.needs_render(src, &src_names, &keep_idx) { 0.6 } else { 0.0 };
     if audio_share > 0.0 {
-        let (tracks, names) = crate::media::audio_segment_with(src, v_start, v_end, audio_keep, audio_gains, &mut |f| progress(f * audio_share), cancel)?;
+        let _mf = crate::media::MfScope::new()?;
+        let (tracks, names) = selection.segment(src, v_start, v_end, &src_names, &keep_idx, &mut |f| progress(f * audio_share), cancel)?;
         let silence = crate::aac::silent_frame()?;
         let end_samples = ((v_end - v_start) * crate::audio::RATE as f64).round() as i64;
         regained = tracks.iter().map(|t| layout_audio(&AudioInput { packets: t, silence: &silence }, 0, end_samples)).collect();
         kept_names = names;
     }
-    for aid in keep.into_iter().filter(|_| regained.is_empty()) {
+    for idx in keep_idx.into_iter().filter(|_| audio_share == 0.0) {
+        let aid = all_audio[idx];
         let t = &r.tracks()[&aid];
         let cfg = AacConfig { bitrate: t.bitrate(), profile: t.audio_profile()?, freq_index: t.sample_freq_index()?, chan_conf: t.channel_config()? };
         let ats = t.timescale() as f64;
@@ -637,8 +644,7 @@ pub fn trim_tracks_with(
         let last = at.iter().rposition(|&x| x < a_out).map_or(0, |i| i as u32 + 1);
         if n > 0 && last >= first {
             audio.push(AudioCut { id: aid, cfg, ts: ats, first, last, base: at[first as usize - 1] });
-            let idx = all_audio.iter().position(|&x| x == aid).unwrap_or(0);
-            kept_names.push(src_names.get(idx).cloned().unwrap_or_default());
+            kept_names.push(src_names[idx].clone());
         }
     }
 
@@ -714,12 +720,19 @@ pub fn trim_tracks_with(
 /// `gains` (сводится заново, если громкость менялась или клип записан до выравнивания голоса),
 /// оглавление файла — в начале (видео начинает играть, не дожидаясь загрузки до конца).
 pub fn one_track(src: &Path, dst: &Path, gains: Option<&[f32]>, progress: &mut dyn FnMut(f64), cancel: &AtomicBool) -> Result<()> {
+    one_track_selected(src, dst, None, gains, progress, cancel)
+}
+
+pub fn one_track_selected(
+    src: &Path, dst: &Path, keep: Option<&[usize]>, gains: Option<&[f32]>,
+    progress: &mut dyn FnMut(f64), cancel: &AtomicBool,
+) -> Result<()> {
     let info = clip_info(src)?;
-    let keep: Vec<usize> = (info.audio_tracks > 0).then_some(0).into_iter().collect();
+    let selection = ExportAudio { keep, gains, mixdown: true };
     let part = dst.with_extension("1t.mp4");
     let fast = dst.with_extension("fs.part");
     let r = (|| {
-        trim_tracks_with(src, &part, 0.0, info.duration + 1.0, Some(&keep), gains, &mut |f| progress(f * 0.9), cancel)?;
+        trim_with_audio(src, &part, 0.0, info.duration + 1.0, selection, &mut |f| progress(f * 0.9), cancel)?;
         crate::media::check(cancel)?;
         crate::montage::faststart(&part, &fast)?;
         Ok(())
